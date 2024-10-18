@@ -22,17 +22,29 @@ QDP messages are concise but flexible, allowing for command execution, telemetry
 
 ### Message Format
 
+The overall message format is
 ```
-[HEADER]
-[COMMAND/TELEMETRY]
-[DATA]
-[CHECKSUM/CRC]
+[HEADER] [PAYLOAD] [CHECKSUM/CRC]
 ```
 
-- **Header**: Type of message (command, response, telemetry), protocol version, and optionally device ID or session ID.
-- **Command/Telemetry**: Indicates the command issued or telemetry being reported.
-- **Data**: Optional field for command parameters or telemetry data.
-- **Checksum/CRC**: Ensures data integrity.
+#### Header
+The header indicates the type of message (command, response, telemetry), protocol version, and optionally device ID or session ID.
+
+```
+[FROM] [TO] [PAYLOAD TYPE]
+```
+
+- `FROM` is a `uint32` (4 bytes) defining the unique ID of the device the message originated from.
+- `TO` is a `uint32` (4 bytes) defining the unique ID of the device the message targeted for.
+
+#### Command/Telemetry
+Indicates the command issued or telemetry being reported.
+  
+#### Data
+Optional field for command parameters or telemetry data.
+  
+#### Checksum/CRC
+Ensures data integrity.
 
 ## 4. Commands and Responses
 Define standard commands and responses:
