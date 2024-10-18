@@ -23,7 +23,10 @@ QDP messages are concise but flexible, allowing for command execution, telemetry
 ### Message Format
 
 ```
-[HEADER] [COMMAND/TELEMETRY] [DATA] [CHECKSUM/CRC]
+[HEADER]
+[COMMAND/TELEMETRY]
+[DATA]
+[CHECKSUM/CRC]
 ```
 
 - **Header**: Type of message (command, response, telemetry), protocol version, and optionally device ID or session ID.
@@ -31,23 +34,12 @@ QDP messages are concise but flexible, allowing for command execution, telemetry
 - **Data**: Optional field for command parameters or telemetry data.
 - **Checksum/CRC**: Ensures data integrity.
 
-#### Example Message
-```
-[0x01] [0xA5] [Device_ID: 0x0001, Voltage: 3.3V] [0x5B]
-```
-
-- `0x01` = telemetry report
-- `0xA5` = data type (voltage)
-- `Checksum = 0x5B`
-
 ## 4. Commands and Responses
 Define standard commands and responses:
 
 ### Commands
-- `0x10`: Start/Stop Device
-- `0x11`: Set Device Parameters
-- `0x12`: Request Telemetry
-- `0x13`: Reboot Device
+- `0x10`: Get Device Ids
+- `0x11`: Get Telemetry Info
 
 ### Responses
 - `0x20`: Acknowledgment (ACK)
@@ -55,10 +47,11 @@ Define standard commands and responses:
 - `0x22`: Telemetry Report
 
 ## 5. Error Handling
-QDP should define error codes for various failures, such as:
+QDP supports the following error codes:
 - `ERR_TIMEOUT`
 - `ERR_UNRECOGNIZED_COMMAND`
 - `ERR_DEVICE_BUSY`
+- `ERR_UNKNOWN_DEVICE`
 
 Devices should handle these gracefully and retry operations if necessary.
 
