@@ -9,7 +9,7 @@ QDP (Qureshi Device Protocol) is designed to facilitate secure, lightweight comm
 - **Physical Layer**: Hardware interface (e.g., Ethernet, Wi-Fi, etc.).
 - **Data Link Layer**: Error detection and link management.
 - **Network Layer**: Addressing and routing (if required).
-- **Transport Layer**: TCP/UDP for reliable or lightweight transmission.
+- **Transport Layer**: Serial (UART)/TCP/UDP for reliable or lightweight transmission.
 - **QDP Layer**: Defines how messages are structured, validated, and handled.
 
 ### Communication Models
