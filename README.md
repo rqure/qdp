@@ -64,6 +64,139 @@ DATA := [S] [4] ['T', 'E', 'M', 'P']
 
 Each DATA block within the payload may represent a unique piece of telemetry data, a command parameter, or an error description, depending on the PAYLOAD_TYPE.
 
+#### 1. **TELEMETRY_EVENT**
+Used by a device to report updated telemetry data when certain conditions are met (e.g., temperature change).
+
+```
+TELEMETRY_EVENT PAYLOAD := [DATA_TYPE] [DATA_SIZE_IN_BYTES] [DATA_BYTES...]
+```
+
+- **`DATA_TYPE`**: Specifies the type of telemetry data (e.g., `I` for int, `F` for float).
+- **`DATA_SIZE_IN_BYTES`**: Length of the telemetry data in bytes.
+- **`DATA_BYTES`**: Actual telemetry data (e.g., temperature value, humidity level).
+
+**Example**: A temperature report of 25.5°C as a float.
+```
+TELEMETRY_EVENT PAYLOAD := [F] [4] [0x41, 0xC8, 0x00, 0x00]
+```
+
+---
+
+#### 2. **TELEMETRY_REQUEST**
+A request sent to a device to retrieve its current telemetry data. The payload is empty for this type, as it only indicates a request.
+
+```
+TELEMETRY_REQUEST PAYLOAD := []
+```
+
+**Example**: The payload section remains 0 bytes.
+
+---
+
+#### 3. **TELEMETRY_RESPONSE**
+This is a response to a `TELEMETRY_REQUEST`, where the payload contains the requested telemetry data.
+
+```
+TELEMETRY_RESPONSE PAYLOAD := [DATA_TYPE] [DATA_SIZE_IN_BYTES] [DATA_BYTES...]
+```
+
+- **`DATA_TYPE`**: The type of data being reported (e.g., `F` for float).
+- **`DATA_SIZE_IN_BYTES`**: Length of the telemetry data.
+- **`DATA_BYTES`**: The actual telemetry data value.
+
+**Example**: A response providing humidity as `65%` in an unsigned integer format.
+```
+TELEMETRY_RESPONSE PAYLOAD := [UI] [4] [0x00, 0x00, 0x00, 0x41]
+```
+
+---
+
+#### 4. **COMMAND_REQUEST**
+Used to send a command to a device, which may require action based on parameters provided in the payload.
+
+```
+COMMAND_REQUEST PAYLOAD := [COMMAND_ID] [DATA_TYPE] [DATA_SIZE_IN_BYTES] [DATA_BYTES...]
+```
+
+- **`COMMAND_ID`**: A unique identifier for the command (e.g., `0x01` for `Set Temperature`).
+- **`DATA_TYPE`**: Specifies the type of parameter data (e.g., `F` for float).
+- **`DATA_SIZE_IN_BYTES`**: Length of the command parameter.
+- **`DATA_BYTES`**: Actual parameter value.
+
+**Example**: A command to set the threshold temperature to `22.5°C`.
+```
+COMMAND_REQUEST PAYLOAD := [0x01] [F] [4] [0x41, 0x38, 0x00, 0x00]
+```
+
+---
+
+#### 5. **COMMAND_RESPONSE**
+Sent in response to a `COMMAND_REQUEST`, confirming success or failure. If successful, it returns the newly set data value.
+
+```
+COMMAND_RESPONSE PAYLOAD := [STATUS_CODE] [DATA_TYPE] [DATA_SIZE_IN_BYTES] [DATA_BYTES...]
+```
+
+- **`STATUS_CODE`**: An integer indicating success (`0x00`) or error (`0x01`).
+- **`DATA_TYPE`**: The type of data returned (matches `COMMAND_REQUEST` if successful).
+- **`DATA_SIZE_IN_BYTES`**: Length of the returned data.
+- **`DATA_BYTES`**: The value returned by the command (if successful).
+
+**Example**: Successful response to setting temperature threshold to `22.5°C`.
+```
+COMMAND_RESPONSE PAYLOAD := [0x00] [F] [4] [0x41, 0x38, 0x00, 0x00]
+```
+
+---
+
+#### 6. **DEVICE_ID_REQUEST**
+A request to retrieve a list of device IDs known to a router or network coordinator. This payload is empty as it’s simply a request.
+
+```
+DEVICE_ID_REQUEST PAYLOAD := []
+```
+
+**Example**: The payload section remains 0 bytes.
+
+---
+
+#### 7. **DEVICE_ID_RESPONSE**
+Response to a `DEVICE_ID_REQUEST`, containing a list of device IDs.
+
+```
+DEVICE_ID_RESPONSE PAYLOAD := [NUM_DEVICES] [DEVICE_ID_LIST...]
+```
+
+- **`NUM_DEVICES`**: Number of device IDs returned (`uint32`).
+- **`DEVICE_ID_LIST`**: Series of `uint32` device IDs.
+
+**Example**: Response with two device IDs: `0x0001` and `0x0002`.
+```
+DEVICE_ID_RESPONSE PAYLOAD := [0x02] [0x00000001] [0x00000002]
+```
+
+---
+
+#### 8. **ERROR_RESPONSE**
+Used to indicate a failure in response to any `*_REQUEST`, containing an error code and, optionally, additional details.
+
+```
+ERROR_RESPONSE PAYLOAD := [ERROR_CODE] [DETAIL_LENGTH] [DETAIL_BYTES...]
+```
+
+- **`ERROR_CODE`**: A code identifying the type of error (e.g., `0x01` for `Invalid Command`).
+- **`DETAIL_LENGTH`**: Length of the error detail message.
+- **`DETAIL_BYTES`**: ASCII string or binary data explaining the error.
+
+**Example**: Error response with code `0x01` (`Invalid Command`) and a detail message “Command not recognized.”
+```
+ERROR_RESPONSE PAYLOAD := [0x01] [0x14] ["Command not recognized"]
+```
+
+---
+
+This structure ensures that each `PAYLOAD_TYPE` in QDP has a clearly defined format, making it easier for devices to parse, interpret, and act upon received messages accurately.
+
 ### Checksum/CRC
 The checksum in QDP uses a 32-bit CRC (Cyclic Redundancy Check) to ensure data integrity, helping detect errors in transmission. QDP uses the CRC32 algorithm with polynomial 0xEDB88320, which is lightweight and suitable for embedded systems and IoT devices.
 
