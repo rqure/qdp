@@ -66,7 +66,7 @@ Payload Example: [S] [4] ["T", "E", "M", "P"]
 2. **TELEMETRY_REQUEST**  
    Requests current telemetry data from a device. Payload is empty.
    ```
-   TELEMETRY_REQUEST PAYLOAD := []
+   TELEMETRY_REQUEST PAYLOAD := [N] [0] []
    ```
 
 3. **TELEMETRY_RESPONSE**  
@@ -79,31 +79,31 @@ Payload Example: [S] [4] ["T", "E", "M", "P"]
    Sends a command to the device with optional parameters.  
    Example: Command to set temperature threshold to 22.5°C.
    ```
-   COMMAND_REQUEST PAYLOAD := [0x01] [F] [4] [0x41, 0x38, 0x00, 0x00]
+   COMMAND_REQUEST PAYLOAD := [F] [4] [0x41, 0x38, 0x00, 0x00]
    ```
 
 5. **COMMAND_RESPONSE**  
    Confirms execution of `COMMAND_REQUEST` with success/failure and result.
    ```
-   COMMAND_RESPONSE PAYLOAD := [0x00] [F] [4] [0x41, 0x38, 0x00, 0x00]
+   COMMAND_RESPONSE PAYLOAD := [F] [4] [0x41, 0x38, 0x00, 0x00]
    ```
 
 6. **DEVICE_ID_REQUEST**  
    Requests a list of device IDs managed by a network device. Payload is empty.
    ```
-   DEVICE_ID_REQUEST PAYLOAD := []
+   DEVICE_ID_REQUEST PAYLOAD := [N] [0] []
    ```
 
 7. **DEVICE_ID_RESPONSE**  
    Responds to `DEVICE_ID_REQUEST` with a list of device IDs.
    ```
-   DEVICE_ID_RESPONSE PAYLOAD := [0x02] [0x00000001] [0x00000002]
+   DEVICE_ID_RESPONSE PAYLOAD := [A] [24] [UI] [4] [0x00, 0x00, 0x00, 0x01] [UI] [4] [0x00, 0x00, 0x00, 0x02]
    ```
 
 8. **ERROR_RESPONSE**  
    Reports failure of a request with error details.
    ```
-   ERROR_RESPONSE PAYLOAD := [0x01] [0x14] ["Command not recognized"]
+   ERROR_RESPONSE PAYLOAD := [S] [13] [0x45, 0x72, 0x72, 0x6F, 0x72, 0x20, 0x4D, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65]
    ```
 
 ### 3. Checksum/CRC
