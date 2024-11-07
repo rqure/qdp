@@ -43,6 +43,7 @@ Each data unit within the payload has a defined type, size, and content, providi
 
 | Type | Abbreviation | Description                             | Size    |
 |------|--------------|-----------------------------------------|---------|
+| Null | `N`          | 32-bit signed integer                   | 0 bytes |
 | Int  | `I`          | 32-bit signed integer                   | 4 bytes |
 | UInt | `UI`         | 32-bit unsigned integer                 | 4 bytes |
 | Float| `F`          | 32-bit floating-point                   | 4 bytes |
