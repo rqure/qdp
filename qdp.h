@@ -8,6 +8,14 @@
 #define QDP_MAX_BUFFER_SIZE 1024 * 1024
 #define QDP_MAX_DEVICES 64
 
+#ifndef QDP_MALLOC
+#define QDP_MALLOC(size) malloc(size)
+#endif
+
+#ifndef QDP_FREE
+#define QDP_FREE(ptr) free(ptr)
+#endif
+
 // Enum for payload types
 typedef enum
 {
@@ -759,7 +767,7 @@ void qdp_init(QDPHandle **handle_ptr, uint32_t root_device_id)
 {
     qdp_crc32_generate_table();
 
-    QDPHandle *handle = (QDPHandle *)malloc(sizeof(QDPHandle));
+    QDPHandle *handle = (QDPHandle *)QDP_MALLOC(sizeof(QDPHandle));
     *handle_ptr = handle;
 
     handle->root_device.id = root_device_id;
