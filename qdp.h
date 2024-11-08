@@ -486,7 +486,7 @@ QDPDevice *qdp_device_register(QDPHandle *handle, uint32_t id)
     {
         return NULL;
     }
-    
+
     QDPDevice *device = &handle->devices[handle->total_devices];
 
     device->id = id;
@@ -755,24 +755,23 @@ int qdp_do_tick(QDPHandle *handle)
     return 0;
 }
 
-QDPHandle qdp_init(uint32_t root_device_id)
+void qdp_init(QDPHandle **handle_ptr, uint32_t root_device_id)
 {
     qdp_crc32_generate_table();
 
-    QDPHandle handle;
+    QDPHandle *handle = (QDPHandle *)malloc(sizeof(QDPHandle));
+    *handle_ptr = handle;
 
-    handle.root_device.id = root_device_id;
-    handle.root_device.get.fn = NULL;
-    handle.root_device.set.fn = NULL;
-    handle.root_device.event.fn = NULL;
-    handle.root_device.changed.fn = NULL;
+    handle->root_device.id = root_device_id;
+    handle->root_device.get.fn = NULL;
+    handle->root_device.set.fn = NULL;
+    handle->root_device.event.fn = NULL;
+    handle->root_device.changed.fn = NULL;
 
-    handle.send.fn = NULL;
-    handle.recv.fn = NULL;
-    handle.total_devices = 0;
+    handle->send.fn = NULL;
+    handle->recv.fn = NULL;
+    handle->total_devices = 0;
 
-    qdp_message_init_from_buffer(&handle.rx_msg, handle.rx_buffer, sizeof(handle.rx_buffer));
-    qdp_message_init_from_buffer(&handle.tx_msg, handle.tx_buffer, sizeof(handle.rx_buffer));
-
-    return handle;
+    qdp_message_init_from_buffer(&handle->rx_msg, handle->rx_buffer, sizeof(handle->rx_buffer));
+    qdp_message_init_from_buffer(&handle->tx_msg, handle->tx_buffer, sizeof(handle->rx_buffer));
 }
