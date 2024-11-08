@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define QDP_MAX_BUFFER_SIZE 1024 * 1024
+#define QDP_MAX_BUFFER_SIZE 1024 * 10
 #define QDP_MAX_DEVICES 64
 
 #ifndef QDP_MALLOC
@@ -763,12 +763,8 @@ int qdp_do_tick(QDPHandle *handle)
     return 0;
 }
 
-void qdp_init(QDPHandle **handle_ptr, uint32_t root_device_id)
-{
+void qdp_init(QDPHandle *handle, uint32_t root_device_id) {
     qdp_crc32_generate_table();
-
-    QDPHandle *handle = (QDPHandle *)QDP_MALLOC(sizeof(QDPHandle));
-    *handle_ptr = handle;
 
     handle->root_device.id = root_device_id;
     handle->root_device.get.fn = NULL;
@@ -782,4 +778,16 @@ void qdp_init(QDPHandle **handle_ptr, uint32_t root_device_id)
 
     qdp_message_init_from_buffer(&handle->rx_msg, handle->rx_buffer, sizeof(handle->rx_buffer));
     qdp_message_init_from_buffer(&handle->tx_msg, handle->tx_buffer, sizeof(handle->rx_buffer));
+}
+
+void qdp_malloc_init(QDPHandle **handle_ptr, uint32_t root_device_id)
+{
+    QDPHandle *handle = (QDPHandle *)QDP_MALLOC(sizeof(QDPHandle));
+    *handle_ptr = handle;
+    if (handle == NULL)
+    {
+        return;
+    }
+
+    qdp_init(handle, root_device_id);
 }
