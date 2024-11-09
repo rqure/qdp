@@ -5,8 +5,13 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#ifndef QDP_MAX_BUFFER_SIZE
 #define QDP_MAX_BUFFER_SIZE 1024 * 10
+#endif
+
+#ifndef QDP_MAX_DEVICES
 #define QDP_MAX_DEVICES 64
+#endif
 
 #ifndef QDP_MALLOC
 #define QDP_MALLOC(size) malloc(size)
