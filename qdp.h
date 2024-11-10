@@ -91,7 +91,7 @@ typedef struct
 {
     uint32_t data_type; // Type of the data
     uint32_t size;      // Size of the content
-    void *content;      // Pointer to the content (can be of any data_type)
+    uint32_t content;   // Content (can be of any data_type)
 } QDPPayload;
 
 // Header struct
@@ -207,7 +207,7 @@ typedef struct
 } QDPHandle;
 
 uint32_t qdp_payload_calc_length(const QDPPayload *payload) {
-    return sizeof(QDPPayload) - sizeof(void *) + payload->size;
+    return sizeof(QDPPayload) - sizeof(uint32_t) + payload->size;
 }
 
 uint32_t qdp_message_calc_length_no_checksum(const QDPMessage *msg) {
@@ -218,20 +218,36 @@ uint32_t qdp_message_calc_length(const QDPMessage *msg) {
     return qdp_message_calc_length_no_checksum(msg) + sizeof(uint32_t);
 }
 
+void qdp_payload_set_null(QDPPayload *payload)
+{
+    payload->data_type = DATA_TYPE_NULL;
+    payload->size = 0;
+}
+
+uint8_t* qdp_payload_content(QDPPayload *payload)
+{
+    return (uint8_t *)&payload->content;
+}
+
+uint8_t* qdp_payload_end_of_content(QDPPayload *payload)
+{
+    return qdp_payload_content(payload) + payload->size;
+}
+
+void qdp_payload_reset(QDPPayload *payload)
+{
+    qdp_payload_set_null(payload);
+}
+
 void qdp_message_init_from_buffer(QDPMessage *msg, uint8_t *buffer, uint32_t buffer_size)
 {
     memset(buffer, 0, buffer_size);
     msg->size = 0;
     msg->max_size = buffer_size;
-
     msg->buffer = buffer;
     msg->header = (QDPHeader *)buffer;
-
     msg->payload = (QDPPayload *)(buffer + sizeof(QDPHeader));
-    msg->payload->content = (void *)(buffer + sizeof(QDPHeader) + sizeof(QDPPayload) - sizeof(void *));
-
-    msg->checksum = (uint32_t *)(msg->payload->content + msg->payload->size);
-
+    msg->checksum = (uint32_t *)(msg->buffer + qdp_message_calc_length_no_checksum(msg));
     msg->validity = QDP_MESSAGE_INCOMPLETE;
 }
 
@@ -247,6 +263,21 @@ void qdp_message_consume(QDPMessage *msg)
     msg->size = 0;
 }
 
+void qdp_header_copy(QDPHeader *dest, const QDPHeader *src)
+{
+    dest->from = src->from;
+    dest->to = src->to;
+    dest->payload_type = src->payload_type;
+    dest->correlation_id = src->correlation_id;
+}
+
+void qdp_payload_copy(QDPPayload *dest, const QDPPayload *src)
+{
+    dest->data_type = src->data_type;
+    dest->size = src->size;
+    memcpy(&dest->content, &src->content, src->size);
+}
+
 void qdp_message_copy(QDPMessage *dest, const QDPMessage *src)
 {
     uint32_t size = src->size;
@@ -255,8 +286,11 @@ void qdp_message_copy(QDPMessage *dest, const QDPMessage *src)
         size = dest->max_size;
     }
 
-    memcpy(dest->buffer, src->buffer, size);
-    dest->size = src->size;
+    qdp_header_copy(dest->header, src->header);
+    qdp_payload_copy(dest->payload, src->payload);
+
+    dest->size = size;
+    dest->checksum = src->checksum;
     dest->validity = src->validity;
 }
 
@@ -316,21 +350,10 @@ QDPPayload *qdp_payload_get_array_index(QDPPayload *payload, uint32_t index)
         }
 
         QDPPayload *payload_i = (QDPPayload *)(payload->content + offset);
-        offset += sizeof(QDPPayload) - sizeof(void *) + payload_i->size;
+        offset += qdp_payload_calc_length(payload_i);
     }
 
     return (QDPPayload *)(payload->content + offset);
-}
-
-void qdp_payload_set_null(QDPPayload *payload)
-{
-    payload->data_type = DATA_TYPE_NULL;
-    payload->size = 0;
-}
-
-void qdp_payload_reset(QDPPayload *payload)
-{
-    qdp_payload_set_null(payload);
 }
 
 void qdp_payload_clear_array(QDPPayload *payload)
@@ -343,70 +366,80 @@ void qdp_payload_set_int(QDPPayload *payload, int32_t value)
 {
     payload->data_type = DATA_TYPE_INT;
     payload->size = sizeof(int32_t);
-    memcpy(payload->content, &value, payload->size);
+    memcpy(&payload->content, &value, payload->size);
 }
 
 void qdp_payload_set_uint(QDPPayload *payload, uint32_t value)
 {
+    ESP_LOGI("QDP_Client", "payload: %p, payload->content, %p", payload, &payload->content);
+
     payload->data_type = DATA_TYPE_UINT;
     payload->size = sizeof(uint32_t);
-    memcpy(payload->content, &value, payload->size);
+
+    memcpy(&payload->content, &value, payload->size);
 }
 
 void qdp_payload_set_float(QDPPayload *payload, float value)
 {
     payload->data_type = DATA_TYPE_FLOAT;
     payload->size = sizeof(float);
-    memcpy(payload->content, &value, payload->size);
+    memcpy(&payload->content, &value, payload->size);
 }
 
 void qdp_payload_set_string(QDPPayload *payload, char *value)
 {
     payload->data_type = DATA_TYPE_STRING;
     payload->size = strlen(value) + 1;
-    memcpy(payload->content, value, payload->size);
+    memcpy(&payload->content, value, payload->size);
 }
 
 void qdp_payload_set_array(QDPPayload *payload, QDPPayload *array, uint32_t count)
 {
     payload->data_type = DATA_TYPE_ARRAY;
     payload->size = 0;
+
     for (uint32_t i = 0; i < count; i++)
     {
-        QDPPayload *payload_i = (QDPPayload *)(payload->content + payload->size);
+        QDPPayload *payload_i = (QDPPayload *) qdp_payload_end_of_content(payload);
+
         payload_i->data_type = array[i].data_type;
         payload_i->size = array[i].size;
-        memcpy(payload_i->content, array[i].content, array[i].size);
-        payload->size += sizeof(QDPPayload) - sizeof(void *) + array[i].size;
+        memcpy(&payload_i->content, &array[i].content, array[i].size);
+
+        payload->size += qdp_payload_calc_length(payload_i);
     }
 }
 
 void qdp_payload_append_int(QDPPayload *payload, int32_t value)
 {
-    QDPPayload *new_payload = (QDPPayload *)(payload->content + payload->size);
+    QDPPayload *new_payload = (QDPPayload *) qdp_payload_end_of_content(payload);
+
     qdp_payload_set_int(new_payload, value);
-    payload->size += sizeof(QDPPayload) - sizeof(void *) + new_payload->size;
+    payload->size += qdp_payload_calc_length(new_payload);
 }
 
 void qdp_payload_append_uint(QDPPayload *payload, uint32_t value)
 {
-    QDPPayload *new_payload = (QDPPayload *)(payload->content + payload->size);
+    QDPPayload *new_payload = (QDPPayload *) qdp_payload_end_of_content(payload);
+    
     qdp_payload_set_uint(new_payload, value);
-    payload->size += sizeof(QDPPayload) - sizeof(void *) + new_payload->size;
+    payload->size += qdp_payload_calc_length(new_payload);
 }
 
 void qdp_payload_append_float(QDPPayload *payload, float value)
 {
-    QDPPayload *new_payload = (QDPPayload *)(payload->content + payload->size);
+    QDPPayload *new_payload = (QDPPayload *) qdp_payload_end_of_content(payload);
+
     qdp_payload_set_float(new_payload, value);
-    payload->size += sizeof(QDPPayload) - sizeof(void *) + new_payload->size;
+    payload->size += qdp_payload_calc_length(new_payload);
 }
 
 void qdp_payload_append_string(QDPPayload *payload, char *value)
 {
-    QDPPayload *new_payload = (QDPPayload *)(payload->content + payload->size);
+    QDPPayload *new_payload = (QDPPayload *) qdp_payload_end_of_content(payload);
+
     qdp_payload_set_string(new_payload, value);
-    payload->size += sizeof(QDPPayload) - sizeof(void *) + new_payload->size;
+    payload->size += qdp_payload_calc_length(new_payload);
 }
 
 // To maintain data integrity, QDP uses a 32-bit CRC (Cyclic Redundancy Check), calculated over the HEADER and PAYLOAD sections.
@@ -450,13 +483,15 @@ uint32_t qdp_crc32_calculate(const QDPMessage *msg)
     return crc ^ 0xFFFFFFFF;
 }
 
-void qdp_crc32_update(const QDPMessage *msg)
+void qdp_crc32_update(QDPMessage *msg)
 {
+    msg->checksum = (uint32_t *)(msg->buffer + qdp_message_calc_length_no_checksum(msg));
     *msg->checksum = qdp_crc32_calculate(msg);
 }
 
-bool qdp_crc32_verify(const QDPMessage *msg)
+bool qdp_crc32_verify(QDPMessage *msg)
 {
+    msg->checksum = (uint32_t *)(msg->buffer + qdp_message_calc_length_no_checksum(msg));
     return *msg->checksum == qdp_crc32_calculate(msg);
 }
 
@@ -552,6 +587,8 @@ int qdp_do_tick(QDPHandle *handle)
         }
 
         qdp_message_update_validity(msg);
+        ESP_LOGI("QDP_Client", "msg->checksum %lu", *msg->checksum);
+        ESP_LOGI("QDP_Client", "msg->validity %d", msg->validity);
         if (msg->validity == QDP_MESSAGE_INVALID)
         {
             qdp_message_consume(msg);
@@ -608,12 +645,17 @@ int qdp_do_tick(QDPHandle *handle)
                 break;
             }
 
+            ESP_LOGI("QDP_Client", "making rsp");
             QDPMessage *rsp = &handle->tx_msg;
+            ESP_LOGI("QDP_Client", "rsp copy");
             qdp_message_copy(rsp, msg);
 
+            ESP_LOGI("QDP_Client", "rsp swap");
             qdp_header_swap_from_to(rsp->header);
+            ESP_LOGI("QDP_Client", "rsp clear");
             qdp_payload_clear_array(rsp->payload);
             rsp->header->payload_type = PAYLOAD_TYPE_DEVICE_ID_RESPONSE;
+            ESP_LOGI("QDP_Client", "rsp append %p", rsp->payload);
 
             qdp_payload_append_uint(rsp->payload, handle->root_device.id);
             for (int i = 0; i < handle->total_devices; i++)
@@ -621,6 +663,7 @@ int qdp_do_tick(QDPHandle *handle)
                 QDPDevice *device = &handle->devices[i];
                 qdp_payload_append_uint(rsp->payload, device->id);
             }
+            ESP_LOGI("QDP_Client", "rsp complete");
 
             qdp_message_complete(rsp);
             if (handle->send.fn != NULL)
