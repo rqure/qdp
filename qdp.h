@@ -5,8 +5,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#ifndef QDP_MAX_BUFFER_SIZE
-#define QDP_MAX_BUFFER_SIZE 1024 * 10
+#ifndef QDP_MAX_BUFFER_CAPACITY
+#define QDP_MAX_BUFFER_CAPACITY 1024 * 10
 #endif
 
 #ifndef QDP_MAX_DEVICES
@@ -110,8 +110,8 @@ typedef struct
     QDPHeader *header;           // Pointer to dynamically allocated header
     QDPPayload *payload;         // Pointer to dynamically allocated payload
     uint32_t *checksum;          // Checksum/CRC for data integrity
-    uint32_t size;               // Size of the message
-    uint32_t max_size;           // Maximum size of the message buffer
+    uint32_t buffered;           // Size of the message
+    uint32_t capacity;           // Maximum size of the message buffer
     QDPMessageValidity validity; // Validity of the message
 } QDPMessage;
 
@@ -200,21 +200,24 @@ typedef struct
     uint32_t total_devices;
 
     QDPMessage rx_msg;
-    uint8_t rx_buffer[QDP_MAX_BUFFER_SIZE];
+    uint8_t rx_buffer[QDP_MAX_BUFFER_CAPACITY];
 
     QDPMessage tx_msg;
-    uint8_t tx_buffer[QDP_MAX_BUFFER_SIZE];
+    uint8_t tx_buffer[QDP_MAX_BUFFER_CAPACITY];
 } QDPHandle;
 
-uint32_t qdp_payload_calc_length(const QDPPayload *payload) {
+uint32_t qdp_payload_calc_length(const QDPPayload *payload)
+{
     return sizeof(QDPPayload) - sizeof(uint32_t) + payload->size;
 }
 
-uint32_t qdp_message_calc_length_no_checksum(const QDPMessage *msg) {
+uint32_t qdp_message_calc_length_no_checksum(const QDPMessage *msg)
+{
     return sizeof(QDPHeader) + qdp_payload_calc_length(msg->payload);
 }
 
-uint32_t qdp_message_calc_length(const QDPMessage *msg) {
+uint32_t qdp_message_calc_length(const QDPMessage *msg)
+{
     return qdp_message_calc_length_no_checksum(msg) + sizeof(uint32_t);
 }
 
@@ -224,12 +227,12 @@ void qdp_payload_set_null(QDPPayload *payload)
     payload->size = 0;
 }
 
-uint8_t* qdp_payload_content(QDPPayload *payload)
+uint8_t *qdp_payload_content(QDPPayload *payload)
 {
     return (uint8_t *)&payload->content;
 }
 
-uint8_t* qdp_payload_end_of_content(QDPPayload *payload)
+uint8_t *qdp_payload_end_of_content(QDPPayload *payload)
 {
     return qdp_payload_content(payload) + payload->size;
 }
@@ -242,8 +245,8 @@ void qdp_payload_reset(QDPPayload *payload)
 void qdp_message_init_from_buffer(QDPMessage *msg, uint8_t *buffer, uint32_t buffer_size)
 {
     memset(buffer, 0, buffer_size);
-    msg->size = 0;
-    msg->max_size = buffer_size;
+    msg->buffered = 0;
+    msg->capacity = buffer_size;
     msg->buffer = buffer;
     msg->header = (QDPHeader *)buffer;
     msg->payload = (QDPPayload *)(buffer + sizeof(QDPHeader));
@@ -251,16 +254,21 @@ void qdp_message_init_from_buffer(QDPMessage *msg, uint8_t *buffer, uint32_t buf
     msg->validity = QDP_MESSAGE_INCOMPLETE;
 }
 
-void qdp_message_consume(QDPMessage *msg)
+void qdp_message_clear_next(QDPMessage *msg)
 {
-    if (msg->size > msg->max_size)
+    uint32_t msg_size = qdp_message_calc_length(msg);
+
+    if (msg_size > msg->capacity)
     {
-        msg->size = 0;
+        msg->buffered = 0;
         return;
     }
-    
-    memmove(msg->buffer, msg->buffer + msg->size, msg->max_size - msg->size);
-    msg->size = 0;
+
+    if (msg->buffered >= msg_size)
+    {
+        memmove(msg->buffer, msg->buffer + msg_size, msg->capacity - msg_size);
+        msg->buffered -= msg_size;
+    }
 }
 
 void qdp_header_copy(QDPHeader *dest, const QDPHeader *src)
@@ -280,16 +288,16 @@ void qdp_payload_copy(QDPPayload *dest, const QDPPayload *src)
 
 void qdp_message_copy(QDPMessage *dest, const QDPMessage *src)
 {
-    uint32_t size = src->size;
-    if (dest->max_size < src->size)
+    uint32_t size = src->buffered;
+    if (dest->capacity < src->buffered)
     {
-        size = dest->max_size;
+        size = dest->capacity;
     }
 
     qdp_header_copy(dest->header, src->header);
     qdp_payload_copy(dest->payload, src->payload);
 
-    dest->size = size;
+    dest->buffered = size;
     dest->checksum = src->checksum;
     dest->validity = src->validity;
 }
@@ -371,8 +379,6 @@ void qdp_payload_set_int(QDPPayload *payload, int32_t value)
 
 void qdp_payload_set_uint(QDPPayload *payload, uint32_t value)
 {
-    ESP_LOGI("QDP_Client", "payload: %p, payload->content, %p", payload, &payload->content);
-
     payload->data_type = DATA_TYPE_UINT;
     payload->size = sizeof(uint32_t);
 
@@ -400,7 +406,7 @@ void qdp_payload_set_array(QDPPayload *payload, QDPPayload *array, uint32_t coun
 
     for (uint32_t i = 0; i < count; i++)
     {
-        QDPPayload *payload_i = (QDPPayload *) qdp_payload_end_of_content(payload);
+        QDPPayload *payload_i = (QDPPayload *)qdp_payload_end_of_content(payload);
 
         payload_i->data_type = array[i].data_type;
         payload_i->size = array[i].size;
@@ -412,7 +418,7 @@ void qdp_payload_set_array(QDPPayload *payload, QDPPayload *array, uint32_t coun
 
 void qdp_payload_append_int(QDPPayload *payload, int32_t value)
 {
-    QDPPayload *new_payload = (QDPPayload *) qdp_payload_end_of_content(payload);
+    QDPPayload *new_payload = (QDPPayload *)qdp_payload_end_of_content(payload);
 
     qdp_payload_set_int(new_payload, value);
     payload->size += qdp_payload_calc_length(new_payload);
@@ -420,15 +426,15 @@ void qdp_payload_append_int(QDPPayload *payload, int32_t value)
 
 void qdp_payload_append_uint(QDPPayload *payload, uint32_t value)
 {
-    QDPPayload *new_payload = (QDPPayload *) qdp_payload_end_of_content(payload);
-    
+    QDPPayload *new_payload = (QDPPayload *)qdp_payload_end_of_content(payload);
+
     qdp_payload_set_uint(new_payload, value);
     payload->size += qdp_payload_calc_length(new_payload);
 }
 
 void qdp_payload_append_float(QDPPayload *payload, float value)
 {
-    QDPPayload *new_payload = (QDPPayload *) qdp_payload_end_of_content(payload);
+    QDPPayload *new_payload = (QDPPayload *)qdp_payload_end_of_content(payload);
 
     qdp_payload_set_float(new_payload, value);
     payload->size += qdp_payload_calc_length(new_payload);
@@ -436,7 +442,7 @@ void qdp_payload_append_float(QDPPayload *payload, float value)
 
 void qdp_payload_append_string(QDPPayload *payload, char *value)
 {
-    QDPPayload *new_payload = (QDPPayload *) qdp_payload_end_of_content(payload);
+    QDPPayload *new_payload = (QDPPayload *)qdp_payload_end_of_content(payload);
 
     qdp_payload_set_string(new_payload, value);
     payload->size += qdp_payload_calc_length(new_payload);
@@ -495,16 +501,20 @@ bool qdp_crc32_verify(QDPMessage *msg)
     return *msg->checksum == qdp_crc32_calculate(msg);
 }
 
-void qdp_message_update_validity(QDPMessage *msg)
+void qdp_message_get_next(QDPMessage *msg)
 {
     msg->validity = QDP_MESSAGE_INCOMPLETE;
 
-    if (msg->size >= qdp_message_calc_length(msg))
+    uint32_t length = qdp_message_calc_length(msg);
+    if (msg->buffered >= length)
     {
         msg->validity = QDP_MESSAGE_VALID;
+        msg->buffered -= length;
 
-        if (msg->size > msg->max_size) {
+        if (msg->buffered > msg->capacity)
+        {
             msg->validity = QDP_MESSAGE_INVALID;
+            msg->buffered = 0;
         }
 
         if (!qdp_crc32_verify(msg))
@@ -524,7 +534,7 @@ void qdp_header_swap_from_to(QDPHeader *header)
 void qdp_message_complete(QDPMessage *msg)
 {
     qdp_crc32_update(msg);
-    msg->size = qdp_message_calc_length(msg);
+    msg->buffered = qdp_message_calc_length(msg);
     msg->validity = QDP_MESSAGE_VALID;
 }
 
@@ -569,37 +579,37 @@ QDPDevice *qdp_device_get(QDPHandle *handle, uint32_t id)
 int qdp_do_tick(QDPHandle *handle)
 {
     // Process incoming messages
+    bool do_recv = false;
     while (true)
     {
-        QDPMessage *msg = &handle->rx_msg;
+        QDPMessage *msg = &handle->rx_msg; 
 
-        if (handle->recv.fn != NULL)
-        {
-            int err = handle->recv.fn(msg, handle->recv.ctx);
-            if (err != 0)
-            {
-                return err;
-            }
-        }
-        else
-        {
-            break;
-        }
-
-        qdp_message_update_validity(msg);
-        ESP_LOGI("QDP_Client", "msg->checksum %lu", *msg->checksum);
-        ESP_LOGI("QDP_Client", "msg->validity %d", msg->validity);
+        qdp_message_get_next(msg);
         if (msg->validity == QDP_MESSAGE_INVALID)
         {
-            qdp_message_consume(msg);
+            continue;
         }
 
-        if (msg->validity != QDP_MESSAGE_VALID)
+        if (!do_recv && msg->validity == QDP_MESSAGE_INCOMPLETE)
+        {
+            if (handle->recv.fn != NULL)
+            {
+                int err = handle->recv.fn(msg, handle->recv.ctx);
+                if (err != 0)
+                {
+                    return err;
+                }
+            }
+
+            do_recv = true;
+            continue;
+        }
+        // If the message is incomplete and we already tried to receive, break
+        else if (do_recv && msg->validity == QDP_MESSAGE_INCOMPLETE)
         {
             break;
         }
 
-        // msg is valid
         switch (msg->header->payload_type)
         {
         case PAYLOAD_TYPE_TELEMETRY_REQUEST:
@@ -645,17 +655,12 @@ int qdp_do_tick(QDPHandle *handle)
                 break;
             }
 
-            ESP_LOGI("QDP_Client", "making rsp");
             QDPMessage *rsp = &handle->tx_msg;
-            ESP_LOGI("QDP_Client", "rsp copy");
             qdp_message_copy(rsp, msg);
 
-            ESP_LOGI("QDP_Client", "rsp swap");
             qdp_header_swap_from_to(rsp->header);
-            ESP_LOGI("QDP_Client", "rsp clear");
             qdp_payload_clear_array(rsp->payload);
             rsp->header->payload_type = PAYLOAD_TYPE_DEVICE_ID_RESPONSE;
-            ESP_LOGI("QDP_Client", "rsp append %p", rsp->payload);
 
             qdp_payload_append_uint(rsp->payload, handle->root_device.id);
             for (int i = 0; i < handle->total_devices; i++)
@@ -663,7 +668,6 @@ int qdp_do_tick(QDPHandle *handle)
                 QDPDevice *device = &handle->devices[i];
                 qdp_payload_append_uint(rsp->payload, device->id);
             }
-            ESP_LOGI("QDP_Client", "rsp complete");
 
             qdp_message_complete(rsp);
             if (handle->send.fn != NULL)
@@ -767,9 +771,6 @@ int qdp_do_tick(QDPHandle *handle)
             }
             break;
         }
-
-        // Clear the message buffer
-        msg->size = 0;
     }
 
     // Process outgoing messages
@@ -811,7 +812,8 @@ int qdp_do_tick(QDPHandle *handle)
     return 0;
 }
 
-void qdp_init(QDPHandle *handle, uint32_t root_device_id) {
+void qdp_init(QDPHandle *handle, uint32_t root_device_id)
+{
     qdp_crc32_generate_table();
 
     handle->root_device.id = root_device_id;
