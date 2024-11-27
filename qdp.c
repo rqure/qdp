@@ -21,92 +21,6 @@ static uint32_t qdp_calc_crc32(const uint8_t *data, size_t length) {
     return crc ^ 0xFFFFFFFF;
 }
 
-// Base64 lookup tables
-static const char base64_chars[] = 
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-static const int base64_invs[] = {
-    62, -1, -1, -1, 63, 52, 53, 54, 55, 56, 57, 58,
-    59, 60, 61, -1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3, 4, 5,
-    6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
-    21, 22, 23, 24, 25, -1, -1, -1, -1, -1, -1, 26, 27, 28,
-    29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
-    43, 44, 45, 46, 47, 48, 49, 50, 51
-};
-
-bool qdp_base64_encode(const uint8_t* input, size_t input_len, uint8_t* output, size_t* output_len) {
-    size_t enc_len = 4 * ((input_len + 2) / 3);
-    if (*output_len < enc_len + 1) return false;
-    *output_len = enc_len;
-    
-    size_t i = 0, j = 0;
-
-    while (i < input_len) {
-        uint32_t octet_a = i < input_len ? input[i++] : 0;
-        uint32_t octet_b = i < input_len ? input[i++] : 0;
-        uint32_t octet_c = i < input_len ? input[i++] : 0;
-
-        uint32_t triple = (octet_a << 16) + (octet_b << 8) + octet_c;
-
-        output[j++] = base64_chars[(triple >> 18) & 0x3F];
-        output[j++] = base64_chars[(triple >> 12) & 0x3F];
-        output[j++] = base64_chars[(triple >> 6) & 0x3F];
-        output[j++] = base64_chars[triple & 0x3F];
-    }
-
-    if (input_len % 3 >= 1) output[enc_len - 1] = '=';
-    if (input_len % 3 == 1) output[enc_len - 2] = '=';
-    output[enc_len] = 0;
-    
-    return true;
-}
-
-bool qdp_base64_decode(const uint8_t* input, size_t input_len, uint8_t* output, size_t* output_len) {
-    if (input_len % 4 != 0) return false;
-    
-    // Validate input characters first
-    for (size_t i = 0; i < input_len; i++) {
-        // Check if character is valid base64 character
-        if (input[i] != '=' && 
-            (input[i] < 43 || input[i] > 122 || base64_invs[input[i] - 43] == -1)) {
-            return false;
-        }
-        
-        // Padding can only appear at the end
-        if (input[i] == '=' && i < input_len - 2) {
-            return false;
-        }
-    }
-    
-    // Count padding characters ('=')
-    size_t padding = 0;
-    if (input_len > 0) {
-        if (input[input_len - 1] == '=') padding++;
-        if (input[input_len - 2] == '=') padding++;
-    }
-    
-    // Calculate actual output length
-    size_t dec_len = ((input_len / 4) * 3) - padding;
-    if (*output_len < dec_len) return false;
-    *output_len = dec_len;
-
-    // Rest of decoding logic
-    for (size_t i = 0, j = 0; i < input_len;) {
-        uint32_t sextet_a = input[i] == '=' ? 0 : base64_invs[input[i] - 43]; i++;
-        uint32_t sextet_b = input[i] == '=' ? 0 : base64_invs[input[i] - 43]; i++;
-        uint32_t sextet_c = input[i] == '=' ? 0 : base64_invs[input[i] - 43]; i++;
-        uint32_t sextet_d = input[i] == '=' ? 0 : base64_invs[input[i] - 43]; i++;
-
-        uint32_t triple = (sextet_a << 18) + (sextet_b << 12) + 
-                         (sextet_c << 6) + sextet_d;
-
-        if (j < dec_len) output[j++] = (triple >> 16) & 0xFF;
-        if (j < dec_len) output[j++] = (triple >> 8) & 0xFF;
-        if (j < dec_len) output[j++] = triple & 0xFF;
-    }
-    
-    return true;
-}
-
 // Buffer operations
 qdp_buffer_t qdp_buffer_create(uint8_t *data, size_t capacity) {
     return (qdp_buffer_t){
@@ -132,28 +46,17 @@ bool qdp_buffer_can_write(const qdp_buffer_t *buf, size_t bytes) {
 
 // Message operations
 bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg) {
-    // Encode payload in stream's encode buffer
-    size_t enc_len = sizeof(((qdp_stream_t*)0)->encode_buf);
-    if (!qdp_base64_encode(msg->payload.data, msg->payload.size, 
-                          ((qdp_stream_t*)buf)->encode_buf, &enc_len)) {
-        return false;
-    }
-
-    // Update header with encoded payload length
-    qdp_header_t header = msg->header;
-    header.payload_len = enc_len;  // Use encoded length in header
-
-    // Write header and encoded payload
-    size_t total_size = sizeof(qdp_header_t) + enc_len;
+    // Write header and raw payload
+    size_t total_size = sizeof(qdp_header_t) + msg->payload.size;
     if (!qdp_buffer_can_write(buf, total_size + sizeof(uint32_t))) {
         return false;
     }
 
-    memcpy(buf->data + buf->size, &header, sizeof(qdp_header_t));
+    memcpy(buf->data + buf->size, &msg->header, sizeof(qdp_header_t));
     buf->size += sizeof(qdp_header_t);
 
-    memcpy(buf->data + buf->size, ((qdp_stream_t*)buf)->encode_buf, enc_len);
-    buf->size += enc_len;
+    memcpy(buf->data + buf->size, msg->payload.data, msg->payload.size);
+    buf->size += msg->payload.size;
 
     uint32_t crc = qdp_calc_crc32(buf->data + buf->position, buf->size - buf->position);
     memcpy(buf->data + buf->size, &crc, sizeof(uint32_t));
@@ -176,15 +79,13 @@ bool qdp_message_read(qdp_buffer_t *buf, qdp_message_t *msg) {
         return false;
     }
 
-    // Decode payload
-    size_t dec_len = sizeof(msg->payload.data);
-    if (!qdp_base64_decode(buf->data + buf->position, 
-                          msg->header.payload_len,
-                          msg->payload.data, &dec_len)) {
+    // Read raw payload
+    if (msg->header.payload_len > QDP_MAX_PAYLOAD_SIZE) {
         return false;
     }
     
-    msg->payload.size = dec_len;
+    memcpy(msg->payload.data, buf->data + buf->position, msg->header.payload_len);
+    msg->payload.size = msg->header.payload_len;
     buf->position += msg->header.payload_len;
 
     // Read and verify checksum

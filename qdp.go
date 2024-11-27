@@ -1,344 +1,259 @@
-package main
+package qdp
 
 import (
-	"encoding/binary"
-	"fmt"
-	"math"
-
-	qdb "github.com/rqure/qdb/src"
+	"errors"
+	"strings"
 )
-
-type QdpPayloadType uint32
 
 const (
-	PAYLOAD_TYPE_TELEMETRY_EVENT = QdpPayloadType(iota + 1)
-	PAYLOAD_TYPE_TELEMETRY_REQUEST
-	PAYLOAD_TYPE_TELEMETRY_RESPONSE
-	PAYLOAD_TYPE_COMMAND_REQUEST
-	PAYLOAD_TYPE_COMMAND_RESPONSE
-	PAYLOAD_TYPE_DEVICE_ID_REQUEST
-	PAYLOAD_TYPE_DEVICE_ID_RESPONSE
-	PAYLOAD_TYPE_ERROR_RESPONSE
+	MaxBufferCapacity = 1024 * 10
+	MaxSubscriptions  = 64
+	MaxTopicLength    = 256
+	MaxPayloadSize    = 512
 )
 
-func (t QdpPayloadType) String() string {
-	switch t {
-	case PAYLOAD_TYPE_TELEMETRY_EVENT:
-		return "telemetry-event"
-	case PAYLOAD_TYPE_TELEMETRY_REQUEST:
-		return "telemetry-request"
-	case PAYLOAD_TYPE_TELEMETRY_RESPONSE:
-		return "telemetry-response"
-	case PAYLOAD_TYPE_COMMAND_REQUEST:
-		return "command-request"
-	case PAYLOAD_TYPE_COMMAND_RESPONSE:
-		return "command-response"
-	case PAYLOAD_TYPE_DEVICE_ID_REQUEST:
-		return "device-id-request"
-	case PAYLOAD_TYPE_DEVICE_ID_RESPONSE:
-		return "device-id-response"
-	case PAYLOAD_TYPE_ERROR_RESPONSE:
-		return "error-response"
-	default:
-		return "unknown"
-	}
-}
-
-type QdpDataType uint32
-
+// Topic pattern matching special characters
 const (
-	DATA_TYPE_NULL = QdpDataType(iota)
-	DATA_TYPE_INT
-	DATA_TYPE_UINT
-	DATA_TYPE_FLOAT
-	DATA_TYPE_STRING
-	DATA_TYPE_ARRAY
+	SingleLevelWildcard = '+'
+	MultiLevelWildcard  = '#'
+	TopicLevelSeparator = '/'
 )
 
-func (t QdpDataType) String() string {
-	switch t {
-	case DATA_TYPE_NULL:
-		return "N"
-	case DATA_TYPE_INT:
-		return "I"
-	case DATA_TYPE_UINT:
-		return "UI"
-	case DATA_TYPE_FLOAT:
-		return "F"
-	case DATA_TYPE_STRING:
-		return "S"
-	case DATA_TYPE_ARRAY:
-		return "A"
-	default:
-		return "UK"
-	}
+// Buffer management
+type Buffer struct {
+	data     []byte
+	size     int
+	capacity int
+	position int
 }
 
-type QdpHeader struct {
-	From          uint32
-	To            uint32
-	PayloadType   QdpPayloadType
-	CorrelationId uint32
+// Message components
+type Header struct {
+	TopicLen   uint32
+	PayloadLen uint32
+	Topic      string
 }
 
-func (h *QdpHeader) String() string {
-	return fmt.Sprintf("H{F: %d, T: %d, PT: %s, C: %d}", h.From, h.To, h.PayloadType, h.CorrelationId)
+type Payload struct {
+	Size uint32
+	Data []byte
 }
 
-type QdpPayload struct {
-	DataType QdpDataType
-	Size     uint32
-	Data     []byte
-}
-
-func (p *QdpPayload) String() string {
-	if p.DataType == DATA_TYPE_INT {
-		return fmt.Sprintf("P{DT: %s, S: %d, D: %d}", p.DataType, p.Size, p.GetInt())
-	} else if p.DataType == DATA_TYPE_UINT {
-		return fmt.Sprintf("P{DT: %s, S: %d, D: %d}", p.DataType, p.Size, p.GetUint())
-	} else if p.DataType == DATA_TYPE_FLOAT {
-		return fmt.Sprintf("P{DT: %s, S: %d, D: %f}", p.DataType, p.Size, p.GetFloat())
-	} else if p.DataType == DATA_TYPE_STRING {
-		return fmt.Sprintf("P{DT: %s, S: %d, D: %s}", p.DataType, p.Size, p.GetString())
-	} else if p.DataType == DATA_TYPE_ARRAY {
-		return fmt.Sprintf("P{DT: %s, S: %d, D: %v}", p.DataType, p.Size, p.GetArray())
-	} else if p.DataType == DATA_TYPE_NULL {
-		return fmt.Sprintf("P{DT: %s, S: %d, D: nil}", p.DataType, p.Size)
-	} else {
-		return fmt.Sprintf("P{DT: %s, S: %d, D: ?%v?}", p.DataType, p.Size, p.Data)
-	}
-}
-
-type QdpMessageValidity uint32
-
-const (
-	MESSAGE_VALIDITY_INCOMPLETE = QdpMessageValidity(iota)
-	MESSAGE_VALIDITY_INVALID
-	MESSAGE_VALIDITY_VALID
-)
-
-type QdpMessage struct {
-	Header   QdpHeader
-	Payload  QdpPayload
+type Message struct {
+	Header   Header
+	Payload  Payload
 	Checksum uint32
-	Validity QdpMessageValidity
 }
 
-type IQdpTransport interface {
-	Send(m *QdpMessage)
-	Recv() *QdpMessage
+// Stream context
+type Stream struct {
+	buffer Buffer
 }
 
-func (p *QdpPayload) SetInt(v int) {
-	p.DataType = DATA_TYPE_INT
-	p.Size = 4
-	p.Data = make([]byte, 4)
-	binary.LittleEndian.PutUint32(p.Data, uint32(v))
+// Callback system
+type Callback struct {
+	Fn  func(*Message, interface{})
+	Ctx interface{}
 }
 
-func (p *QdpPayload) GetInt() int {
-	return int(binary.LittleEndian.Uint32(p.Data))
+type Subscription struct {
+	Topic    string
+	Callback Callback
 }
 
-func (p *QdpPayload) SetUint(v uint) {
-	p.DataType = DATA_TYPE_UINT
-	p.Size = 4
-	p.Data = make([]byte, 4)
-	binary.LittleEndian.PutUint32(p.Data, uint32(v))
+// Protocol errors
+var (
+	ErrBufferFull      = errors.New("buffer full")
+	ErrPayloadTooLarge = errors.New("payload too large")
+)
+
+// Main context
+type QDP struct {
+	transport struct {
+		send func(*Buffer, interface{}) error
+		recv func(*Buffer, interface{}) error
+		ctx  interface{}
+	}
+
+	subs   []Subscription
+	rx     Stream
+	tx     Stream
+	rxData []byte
+	txData []byte
 }
 
-func (p *QdpPayload) GetUint() uint {
-	return uint(binary.LittleEndian.Uint32(p.Data))
+// Create new QDP instance
+func New() *QDP {
+	q := &QDP{
+		subs:   make([]Subscription, 0, MaxSubscriptions),
+		rxData: make([]byte, MaxBufferCapacity),
+		txData: make([]byte, MaxBufferCapacity),
+	}
+	q.rx.buffer.data = q.rxData
+	q.rx.buffer.capacity = MaxBufferCapacity
+	q.tx.buffer.data = q.txData
+	q.tx.buffer.capacity = MaxBufferCapacity
+	return q
 }
 
-func (p *QdpPayload) SetFloat(v float32) {
-	p.DataType = DATA_TYPE_FLOAT
-	p.Size = 4
-	p.Data = make([]byte, 4)
-	binary.LittleEndian.PutUint32(p.Data, math.Float32bits(v))
+// Set transport functions
+func (q *QDP) SetTransport(send func(*Buffer, interface{}) error,
+	recv func(*Buffer, interface{}) error,
+	ctx interface{}) {
+	q.transport.send = send
+	q.transport.recv = recv
+	q.transport.ctx = ctx
 }
 
-func (p *QdpPayload) GetFloat() float32 {
-	return math.Float32frombits(binary.LittleEndian.Uint32(p.Data))
+// Subscribe to a topic pattern
+func (q *QDP) Subscribe(pattern string, fn func(*Message, interface{}), ctx interface{}) bool {
+	if len(q.subs) >= MaxSubscriptions {
+		return false
+	}
+	q.subs = append(q.subs, Subscription{
+		Topic:    pattern,
+		Callback: Callback{Fn: fn, Ctx: ctx},
+	})
+	return true
 }
 
-func (p *QdpPayload) SetString(v string) {
-	p.DataType = DATA_TYPE_STRING
-	p.Size = uint32(len(v)) + 1
-	p.Data = append([]byte(v), 0)
-}
-
-func (p *QdpPayload) GetString() string {
-	return string(p.Data[:len(p.Data)-1])
-}
-
-func (p *QdpPayload) SetArray(a []QdpPayload) {
-	p.DataType = DATA_TYPE_ARRAY
-	p.Size = 0
-	p.Data = make([]byte, p.Size)
-	for _, v := range a {
-		p.Size += 4 + 4 + v.Size
-		dt := make([]byte, 4)
-		binary.LittleEndian.PutUint32(dt, uint32(v.DataType))
-		sz := make([]byte, 4)
-		binary.LittleEndian.PutUint32(sz, v.Size)
-		p.Data = append(p.Data, dt...)
-		p.Data = append(p.Data, sz...)
-		p.Data = append(p.Data, v.Data...)
+// Unsubscribe from a topic pattern
+func (q *QDP) Unsubscribe(pattern string) {
+	for i := 0; i < len(q.subs); i++ {
+		if q.subs[i].Topic == pattern {
+			q.subs = append(q.subs[:i], q.subs[i+1:]...)
+			i--
+		}
 	}
 }
 
-func (p *QdpPayload) GetArray() []QdpPayload {
-	a := make([]QdpPayload, 0)
-	for i := 0; i < len(p.Data); {
-		dt := binary.LittleEndian.Uint32(p.Data[i : i+4])
-		i += 4
-		sz := binary.LittleEndian.Uint32(p.Data[i : i+4])
-		i += 4
-		d := make([]byte, sz)
-		copy(d, p.Data[i:i+int(sz)])
-		i += int(sz)
-		a = append(a, QdpPayload{
-			DataType: QdpDataType(dt),
-			Size:     sz,
-			Data:     d,
-		})
-	}
-	return a
-}
-
-func (a *QdpPayload) AppendArray(item QdpPayload) {
-	a.Size += 4 + 4 + item.Size
-	dt := make([]byte, 4)
-	binary.LittleEndian.PutUint32(dt, uint32(item.DataType))
-	sz := make([]byte, 4)
-	binary.LittleEndian.PutUint32(sz, item.Size)
-	a.Data = append(a.Data, dt...)
-	a.Data = append(a.Data, sz...)
-	a.Data = append(a.Data, item.Data...)
-}
-
-func (p *QdpPayload) SetNull() {
-	p.DataType = DATA_TYPE_NULL
-	p.Size = 0
-	p.Data = make([]byte, 0)
-}
-
-func (p *QdpPayload) ClearArray() {
-	p.DataType = DATA_TYPE_ARRAY
-	p.Size = 0
-	p.Data = make([]byte, 0)
-}
-
-func (m *QdpMessage) Complete() {
-	m.Checksum = m.CalculateChecksum()
-	m.Validity = MESSAGE_VALIDITY_VALID
-}
-
-func (m *QdpMessage) FromBytes(b []byte) []byte {
-	m.Validity = MESSAGE_VALIDITY_INCOMPLETE
-
-	if len(b) < 24 {
-		return b
+// Publish string message
+func (q *QDP) PublishString(topic string, str string) error {
+	if len(str) > MaxPayloadSize {
+		return ErrPayloadTooLarge
 	}
 
-	m.Header.From = binary.LittleEndian.Uint32(b[0:4])
-	m.Header.To = binary.LittleEndian.Uint32(b[4:8])
-	m.Header.PayloadType = QdpPayloadType(binary.LittleEndian.Uint32(b[8:12]))
-	m.Header.CorrelationId = binary.LittleEndian.Uint32(b[12:16])
-	m.Payload.DataType = QdpDataType(binary.LittleEndian.Uint32(b[16:20]))
-	m.Payload.Size = binary.LittleEndian.Uint32(b[20:24])
-
-	if len(b) < 24+int(m.Payload.Size)+4 {
-		return b
+	msg := Message{
+		Header: Header{
+			TopicLen:   uint32(len(topic)),
+			PayloadLen: uint32(len(str)),
+			Topic:      topic,
+		},
+		Payload: Payload{
+			Size: uint32(len(str)),
+			Data: []byte(str),
+		},
 	}
 
-	m.Payload.Data = make([]byte, m.Payload.Size)
-	if m.Payload.Size > 0 {
-		copy(m.Payload.Data, b[24:24+m.Payload.Size])
-	}
-	m.Checksum = binary.LittleEndian.Uint32(b[24+m.Payload.Size : 28+m.Payload.Size])
-
-	m.Validity = MESSAGE_VALIDITY_VALID
-
-	calculatedChecksum := m.CalculateChecksum()
-	if m.Checksum != calculatedChecksum {
-		qdb.Warn("[QdpMessage::FromBytes] Invalid checksum: %d != %d", m.Checksum, calculatedChecksum)
-		m.Validity = MESSAGE_VALIDITY_INVALID
+	q.tx.buffer.Reset()
+	if err := q.tx.WriteMessage(&msg); err != nil {
+		return err
 	}
 
-	return b[28+m.Payload.Size:]
+	if q.transport.send != nil {
+		return q.transport.send(&q.tx.buffer, q.transport.ctx)
+	}
+	return nil
 }
 
-func (m *QdpMessage) ToBytes() []byte {
-	b := make([]byte, 0)
+// Process incoming messages
+func (q *QDP) Process() error {
+	if q.transport.recv == nil {
+		return nil
+	}
 
-	from := make([]byte, 4)
-	binary.LittleEndian.PutUint32(from, m.Header.From)
-	b = append(b, from...)
+	q.rx.buffer.Reset()
+	if err := q.transport.recv(&q.rx.buffer, q.transport.ctx); err != nil {
+		return err
+	}
 
-	to := make([]byte, 4)
-	binary.LittleEndian.PutUint32(to, m.Header.To)
-	b = append(b, to...)
-
-	pt := make([]byte, 4)
-	binary.LittleEndian.PutUint32(pt, uint32(m.Header.PayloadType))
-	b = append(b, pt...)
-
-	cid := make([]byte, 4)
-	binary.LittleEndian.PutUint32(cid, m.Header.CorrelationId)
-	b = append(b, cid...)
-
-	dt := make([]byte, 4)
-	binary.LittleEndian.PutUint32(dt, uint32(m.Payload.DataType))
-	b = append(b, dt...)
-
-	sz := make([]byte, 4)
-	binary.LittleEndian.PutUint32(sz, m.Payload.Size)
-	b = append(b, sz...)
-
-	b = append(b, m.Payload.Data...)
-
-	cs := make([]byte, 4)
-	binary.LittleEndian.PutUint32(cs, m.Checksum)
-	b = append(b, cs...)
-
-	return b
-}
-
-func (m *QdpMessage) CalculateChecksum() uint32 {
-	b := m.ToBytes()
-	return crc32table.Calculate(b[:len(b)-4])
-}
-
-func (m *QdpMessage) String() string {
-	return fmt.Sprintf("M{%s, %s, %d}", m.Header.String(), m.Payload.String(), m.Checksum)
-}
-
-type Crc32Table [256]uint32
-
-func NewCrc32Table() *Crc32Table {
-	t := &Crc32Table{}
-	for i := 0; i < 256; i++ {
-		crc := uint32(i)
-		for j := 0; j < 8; j++ {
-			if crc&1 == 1 {
-				crc = (crc >> 1) ^ 0xEDB88320
-			} else {
-				crc = crc >> 1
+	var msg Message
+	for q.rx.NextMessage(&msg) {
+		// Match against subscriptions
+		for _, sub := range q.subs {
+			if TopicMatches(sub.Topic, msg.Header.Topic) {
+				sub.Callback.Fn(&msg, sub.Callback.Ctx)
 			}
 		}
-		t[i] = crc
 	}
-	return t
+	return nil
 }
 
-func (t *Crc32Table) Calculate(data []byte) uint32 {
-	crc := uint32(0xFFFFFFFF)
-	for _, b := range data {
-		crc = (crc >> 8) ^ t[(crc^uint32(b))&0xFF]
+// Topic pattern matching
+func TopicMatches(pattern, topic string) bool {
+	if pattern == "#" {
+		return true
 	}
-	return crc ^ 0xFFFFFFFF
+
+	parts := strings.Split(pattern, string(TopicLevelSeparator))
+	topics := strings.Split(topic, string(TopicLevelSeparator))
+
+	if len(parts) > len(topics) && parts[len(parts)-1] != "#" {
+		return false
+	}
+
+	for i := 0; i < len(parts); i++ {
+		if i >= len(topics) {
+			return false
+		}
+
+		if parts[i] == "#" {
+			return i == len(parts)-1
+		}
+
+		if parts[i] != "+" && parts[i] != topics[i] {
+			return false
+		}
+	}
+
+	return len(parts) == len(topics) ||
+		(len(parts) == len(topics)-1 && parts[len(parts)-1] == "#")
 }
 
-var crc32table *Crc32Table = NewCrc32Table()
+// Buffer methods
+func (b *Buffer) Reset() {
+	b.size = 0
+	b.position = 0
+}
+
+func (b *Buffer) CanRead(bytes int) bool {
+	return b.position+bytes <= b.size
+}
+
+func (b *Buffer) CanWrite(bytes int) bool {
+	return b.size+bytes <= b.capacity
+}
+
+// Stream methods
+func (s *Stream) WriteMessage(msg *Message) error {
+	totalSize := 4 + 4 + len(msg.Header.Topic) + len(msg.Payload.Data) + 4
+	if !s.buffer.CanWrite(totalSize) {
+		return ErrBufferFull
+	}
+
+	// Write message
+	writeUint32(s.buffer.data[s.buffer.size:], msg.Header.TopicLen)
+	s.buffer.size += 4
+	writeUint32(s.buffer.data[s.buffer.size:], uint32(len(msg.Payload.Data)))
+	s.buffer.size += 4
+	copy(s.buffer.data[s.buffer.size:], msg.Header.Topic)
+	s.buffer.size += len(msg.Header.Topic)
+	copy(s.buffer.data[s.buffer.size:], msg.Payload.Data)
+	s.buffer.size += len(msg.Payload.Data)
+
+	// Calculate and write checksum
+	checksum := crc32(s.buffer.data[:s.buffer.size])
+	writeUint32(s.buffer.data[s.buffer.size:], checksum)
+	s.buffer.size += 4
+
+	return nil
+}
+
+func (s *Stream) NextMessage(msg *Message) bool {
+	if s.buffer.position >= s.buffer.size {
+		return false
+	}
+	return s.ReadMessage(msg)
+}
+
+// ... existing helper functions and error definitions ...

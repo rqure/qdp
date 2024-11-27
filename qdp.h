@@ -65,7 +65,6 @@ typedef struct {
 // Transport stream context with encoding buffer
 typedef struct {
     qdp_buffer_t buffer;
-    uint8_t encode_buf[QDP_MAX_PAYLOAD_SIZE * 2]; // For base64 encoding/decoding
 } qdp_stream_t;
 
 // Simplified callback system
@@ -101,10 +100,6 @@ qdp_buffer_t qdp_buffer_create(uint8_t *data, size_t capacity);
 void qdp_buffer_reset(qdp_buffer_t *buf);
 bool qdp_buffer_can_read(const qdp_buffer_t *buf, size_t bytes);
 bool qdp_buffer_can_write(const qdp_buffer_t *buf, size_t bytes);
-
-// Base64 utilities
-bool qdp_base64_encode(const uint8_t* input, size_t input_len, uint8_t* output, size_t* output_len);
-bool qdp_base64_decode(const uint8_t* input, size_t input_len, uint8_t* output, size_t* output_len);
 
 // Updated message operations
 bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg);

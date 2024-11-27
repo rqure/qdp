@@ -65,24 +65,10 @@ TEST(buffer_operations) {
     assert(buf.position == 0);
 }
 
-// Base64 Tests
-TEST(base64_codec) {
-    const uint8_t input[] = "Hello, World!";
-    uint8_t encoded[128];
-    uint8_t decoded[128];
-    size_t enc_len = sizeof(encoded);
-    size_t dec_len = sizeof(decoded);
-    
-    assert(qdp_base64_encode(input, strlen((char*)input), encoded, &enc_len));
-    assert(qdp_base64_decode(encoded, enc_len, decoded, &dec_len));
-    assert(dec_len == strlen((char*)input));
-    assert(memcmp(input, decoded, dec_len) == 0);
-}
-
-// Message Tests
+// Message Tests - Updated without encoding/decoding
 TEST(message_operations) {
     uint8_t buffer[1024];
-    qdp_stream_t stream = { .buffer = {0}, .encode_buf = {0} };
+    qdp_stream_t stream = { .buffer = {0} };
     stream.buffer = qdp_buffer_create(buffer, sizeof(buffer));
     
     qdp_message_t msg = {0};
@@ -133,9 +119,10 @@ TEST(edge_cases) {
     strcpy(msg.header.topic, "test/empty");
     msg.header.topic_len = strlen(msg.header.topic);
     msg.payload.size = 0;
+    msg.header.payload_len = 0;
     
     uint8_t buffer[1024];
-    qdp_stream_t stream = { .buffer = {0}, .encode_buf = {0} };
+    qdp_stream_t stream = { .buffer = {0} };
     stream.buffer = qdp_buffer_create(buffer, sizeof(buffer));
     
     assert(qdp_message_write(&stream.buffer, &msg));
@@ -147,6 +134,7 @@ TEST(edge_cases) {
     
     // Test maximum size payload
     msg.payload.size = QDP_MAX_PAYLOAD_SIZE;
+    msg.header.payload_len = QDP_MAX_PAYLOAD_SIZE;
     memset(msg.payload.data, 'X', msg.payload.size);
     
     stream.buffer.size = 0;
@@ -161,7 +149,7 @@ TEST(edge_cases) {
 // Stress test for buffer handling
 TEST(buffer_stress) {
     uint8_t buffer[QDP_MAX_BUFFER_CAPACITY];
-    qdp_stream_t stream = { .buffer = {0}, .encode_buf = {0} };
+    qdp_stream_t stream = { .buffer = {0} };
     stream.buffer = qdp_buffer_create(buffer, sizeof(buffer));
     
     // Write multiple messages until buffer is nearly full
@@ -174,7 +162,7 @@ TEST(buffer_stress) {
     
     int count = 0;
     while (1) {
-        qdp_stream_t temp_stream = { .buffer = {0}, .encode_buf = {0} };
+        qdp_stream_t temp_stream = { .buffer = {0} };
         temp_stream.buffer = qdp_buffer_create(
             buffer + stream.buffer.size,
             sizeof(buffer) - stream.buffer.size
@@ -212,20 +200,15 @@ TEST(buffer_stress) {
 
 // Negative test cases
 TEST(negative_cases) {
-    // Test invalid base64
-    uint8_t invalid_base64[] = "!@#$";
-    uint8_t output[128];
-    size_t output_len = sizeof(output);
-    assert(!qdp_base64_decode(invalid_base64, 4, output, &output_len));
-    
     // Test buffer overflow prevention
     qdp_message_t msg = {0};
     strcpy(msg.header.topic, "test/overflow");
     msg.header.topic_len = strlen(msg.header.topic);
     msg.payload.size = QDP_MAX_PAYLOAD_SIZE + 1;
+    msg.header.payload_len = msg.payload.size;
     
     uint8_t small_buf[64];
-    qdp_stream_t stream = { .buffer = {0}, .encode_buf = {0} };
+    qdp_stream_t stream = { .buffer = {0} };
     stream.buffer = qdp_buffer_create(small_buf, sizeof(small_buf));
     
     assert(!qdp_message_write(&stream.buffer, &msg));
@@ -313,7 +296,6 @@ __asm__(".section .note.GNU-stack,\"\",@progbits");
 
 int main(void) {
     RUN_TEST(buffer_operations);
-    RUN_TEST(base64_codec);
     RUN_TEST(message_operations);
     RUN_TEST(protocol_pubsub);
     RUN_TEST(edge_cases);
