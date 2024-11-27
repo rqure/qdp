@@ -28,11 +28,9 @@ func main() {
 	schemaValidator.AddEntity("QdpTcpTransport", "Address", "IsClient", "IsEnabled", "IsConnected")
 	schemaValidator.AddEntity("QdpDevice",
 		"QdpId",
-		"IsIncoming", "TransportReference",
 		"GetDevicesTrigger", "DeviceList",
-		"LastError",
-		"GetTelemetryTrigger", "TelemetryAsInt", "TelemetryAsFloat", "TelemetryAsString", "TelemetryAsArray", "TelemetryAsNull",
-		"CommandAsInt", "CommandAsFloat", "CommandAsString", "CommandAsArray", "CommandAsNull",
+		"GetTelemetryTrigger", "TelemetryFn",
+		"CommandString", "CommandInt", "CommandFloat",
 	)
 
 	dbWorker.Signals.SchemaUpdated.Connect(qdb.Slot(schemaValidator.ValidationRequired))

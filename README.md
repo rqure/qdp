@@ -10,101 +10,37 @@ Each QDP message has a compact, consistent structure divided into three parts:
 [HEADER] [PAYLOAD] [CHECKSUM/CRC]
 ```
 
-- **HEADER:** Identifies sender, receiver, message type, and correlation ID.
-- **PAYLOAD:** Contains data specific to the message type.
+- **HEADER:** Identifies the topic length, topic, and payload length.
+- **PAYLOAD:** Contains base64 encoded data.
 - **CHECKSUM/CRC:** Ensures data integrity.
 
 ### 1. Header
-The header defines the origin, destination, type, and tracking info for each message. This simple structure ensures accurate routing and efficient parsing.
+The header defines the length of the topic, the topic itself, and the length of the payload. This simple structure ensures accurate routing and efficient parsing.
 
 **Header Format:**
 ```
-HEADER := [FROM] [TO] [PAYLOAD_TYPE] [CORRELATION_ID]
+HEADER := [TOPIC_LENGTH] [PAYLOAD_LENGTH] [TOPIC]
 ```
 
 | Field           | Type    | Description                                                  |
 |-----------------|---------|--------------------------------------------------------------|
-| `FROM`          | uint32  | Unique ID of the message's source.                           |
-| `TO`            | uint32  | Unique ID of the target device (0 for broadcast messages).   |
-| `PAYLOAD_TYPE`  | uint32  | Type of payload (e.g., TELEMETRY_EVENT, COMMAND_REQUEST).    |
-| `CORRELATION_ID`| uint32  | Used for tracking request-response pairs asynchronously.     |
+| `TOPIC_LENGTH`  | uint32  | Length of the topic string in bytes.                         |
+| `PAYLOAD_LENGTH`| uint32  | Length of the payload in bytes.                              |
+| `TOPIC`         | string  | Topic of the message.                                        |
 
 **Example Header:**  
-If device `0x0001` sends a telemetry request to device `0x0002`:
+If the topic is `temperature` and the payload length is `4` bytes:
 ```
-Header Example: [0x0001] [0x0002] [0x0002] [0xABCD]
+Header Example: [11] [4] [temperature]
 ```
 
 ### 2. Payload
-The payload contains message-specific data, structured based on `PAYLOAD_TYPE`. QDP’s modular design supports diverse data requirements across devices.
-
-#### Data Types in Payload
-Each data unit within the payload has a defined type, size, and content, providing flexibility for different device capabilities.
-
-| Type | Abbreviation | Description                             | Size    |
-|------|--------------|-----------------------------------------|---------|
-| Null | `N`          | 32-bit signed integer                   | 0 bytes |
-| Int  | `I`          | 32-bit signed integer                   | 4 bytes |
-| UInt | `UI`         | 32-bit unsigned integer                 | 4 bytes |
-| Float| `F`          | 32-bit floating-point                   | 4 bytes |
-| String | `S`        | Variable-length, preceded by length     | 4 + n bytes |
-| Array | `A`         | Array of data, with prefixed length     | 4 + n bytes |
+The payload contains message-specific data, structured based on `TOPIC`. QDP’s modular design supports diverse data requirements across devices.
 
 #### Example: String Payload for "TEMP"
 ```
-Payload Example: [S] [4] ["T", "E", "M", "P"]
+Payload Example: ["T", "E", "M", "P"]
 ```
-
-### Payload Types
-1. **TELEMETRY_EVENT**  
-   Reports updated telemetry data when a device condition changes.  
-   Example: Temperature reading of 25.5°C as a float.
-   ```
-   TELEMETRY_EVENT PAYLOAD := [F] [4] [0x41, 0xC8, 0x00, 0x00]
-   ```
-
-2. **TELEMETRY_REQUEST**  
-   Requests current telemetry data from a device. Payload is empty.
-   ```
-   TELEMETRY_REQUEST PAYLOAD := [N] [0] []
-   ```
-
-3. **TELEMETRY_RESPONSE**  
-   Responds to `TELEMETRY_REQUEST` with requested data.
-   ```
-   TELEMETRY_RESPONSE PAYLOAD := [UI] [4] [0x00, 0x00, 0x00, 0x41]
-   ```
-
-4. **COMMAND_REQUEST**  
-   Sends a command to the device with optional parameters.  
-   Example: Command to set temperature threshold to 22.5°C.
-   ```
-   COMMAND_REQUEST PAYLOAD := [F] [4] [0x41, 0x38, 0x00, 0x00]
-   ```
-
-5. **COMMAND_RESPONSE**  
-   Confirms execution of `COMMAND_REQUEST` with success/failure and result.
-   ```
-   COMMAND_RESPONSE PAYLOAD := [F] [4] [0x41, 0x38, 0x00, 0x00]
-   ```
-
-6. **DEVICE_ID_REQUEST**  
-   Requests a list of device IDs managed by a network device. Payload is empty.
-   ```
-   DEVICE_ID_REQUEST PAYLOAD := [N] [0] []
-   ```
-
-7. **DEVICE_ID_RESPONSE**  
-   Responds to `DEVICE_ID_REQUEST` with a list of device IDs.
-   ```
-   DEVICE_ID_RESPONSE PAYLOAD := [A] [24] [UI] [4] [0x00, 0x00, 0x00, 0x01] [UI] [4] [0x00, 0x00, 0x00, 0x02]
-   ```
-
-8. **ERROR_RESPONSE**  
-   Reports failure of a request with error details.
-   ```
-   ERROR_RESPONSE PAYLOAD := [S] [13] [0x45, 0x72, 0x72, 0x6F, 0x72, 0x20, 0x4D, 0x65, 0x73, 0x73, 0x61, 0x67, 0x65]
-   ```
 
 ### 3. Checksum/CRC
 To maintain data integrity, QDP uses a 32-bit CRC (Cyclic Redundancy Check), calculated over the `HEADER` and `PAYLOAD` sections. The protocol uses CRC32 with polynomial `0xEDB88320`.

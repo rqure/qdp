@@ -10,14 +10,14 @@ import (
 	qdb "github.com/rqure/qdb/src"
 )
 
-type TCPServerGateway struct {
+type TCPServerTransport struct {
 	addr string
 	quit chan interface{}
 	tx   chan *QdpMessage
 	rx   chan *QdpMessage
 }
 
-type TCPClientGateway struct {
+type TCPClientTransport struct {
 	ctx     context.Context
 	conn    net.Conn
 	tx      chan *QdpMessage
@@ -25,20 +25,20 @@ type TCPClientGateway struct {
 	OnClose func()
 }
 
-func (s *TCPServerGateway) Start() {
+func (s *TCPServerTransport) Start() {
 	listener, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		log.Printf("Failed to listen on %s: %v", s.addr, err)
 		return
 	}
 
-	qdb.Info("[TCPServerGateway::Start] Listening on %s", s.addr)
+	qdb.Info("[TCPServerTransport::Start] Listening on %s", s.addr)
 
 	go s.doListen(listener)
 }
 
-func NewTCPServerGateway(addr string) *TCPServerGateway {
-	return &TCPServerGateway{
+func NewTCPServerTransport(addr string) *TCPServerTransport {
+	return &TCPServerTransport{
 		addr: addr,
 		quit: make(chan interface{}, 1),
 		tx:   make(chan *QdpMessage, 100),
@@ -46,16 +46,16 @@ func NewTCPServerGateway(addr string) *TCPServerGateway {
 	}
 }
 
-func NewTCPClientGateway(addr string) *TCPClientGateway {
-	qdb.Info("[NewTCPClientGateway] Connecting to %s", addr)
+func NewTCPClientTransport(addr string) *TCPClientTransport {
+	qdb.Info("[NewTCPClientTransport] Connecting to %s", addr)
 
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		qdb.Error("[NewTCPClientGateway] Failed to connect to %s: %v", addr, err)
+		qdb.Error("[NewTCPClientTransport] Failed to connect to %s: %v", addr, err)
 		return nil
 	}
 
-	return &TCPClientGateway{
+	return &TCPClientTransport{
 		conn: conn,
 		ctx:  context.Background(),
 		tx:   make(chan *QdpMessage, 10),
@@ -63,7 +63,7 @@ func NewTCPClientGateway(addr string) *TCPClientGateway {
 	}
 }
 
-func (s *TCPServerGateway) doListen(l net.Listener) {
+func (s *TCPServerTransport) doListen(l net.Listener) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -77,11 +77,11 @@ func (s *TCPServerGateway) doListen(l net.Listener) {
 			default:
 				conn, err := l.Accept()
 				if err != nil {
-					qdb.Error("[TCPServerGateway::doListen] Failed to accept connection: %v", err)
+					qdb.Error("[TCPServerTransport::doListen] Failed to accept connection: %v", err)
 					continue
 				}
 
-				client := &TCPClientGateway{
+				client := &TCPClientTransport{
 					ctx:  ctx,
 					conn: conn,
 					tx:   make(chan *QdpMessage, 10),
@@ -106,7 +106,7 @@ func (s *TCPServerGateway) doListen(l net.Listener) {
 			return
 		case msg := <-s.tx:
 			clients.Range(func(key, value interface{}) bool {
-				client := key.(*TCPClientGateway)
+				client := key.(*TCPClientTransport)
 				client.tx <- msg
 				return true
 			})
@@ -114,8 +114,8 @@ func (s *TCPServerGateway) doListen(l net.Listener) {
 	}
 }
 
-func (c *TCPClientGateway) doHandleConnection() {
-	qdb.Info("[TCPClientGateway::doHandleConnection] Handling new connection: %v", c.conn.RemoteAddr())
+func (c *TCPClientTransport) doHandleConnection() {
+	qdb.Info("[TCPClientTransport::doHandleConnection] Handling new connection: %v", c.conn.RemoteAddr())
 
 	_, cancel := context.WithCancel(c.ctx)
 	defer cancel()
@@ -127,7 +127,7 @@ func (c *TCPClientGateway) doHandleConnection() {
 			c.OnClose()
 		}
 
-		qdb.Info("[TCPClientGateway::doHandleConnection] Closed connection: %v", c.conn.RemoteAddr())
+		qdb.Info("[TCPClientTransport::doHandleConnection] Closed connection: %v", c.conn.RemoteAddr())
 	}()
 
 	go func() {
@@ -137,14 +137,14 @@ func (c *TCPClientGateway) doHandleConnection() {
 				return
 			case msg := <-c.tx:
 				if msg.Validity != MESSAGE_VALIDITY_VALID {
-					qdb.Error("[TCPClientGateway::doHandleConnection] Attempted to send invalid message")
+					qdb.Error("[TCPClientTransport::doHandleConnection] Attempted to send invalid message")
 					return
 				}
 
-				qdb.Trace("[TCPClientGateway::doHandleConnection] Sending message: %v", msg)
+				qdb.Trace("[TCPClientTransport::doHandleConnection] Sending message: %v", msg)
 				_, err := c.conn.Write(msg.ToBytes())
 				if err != nil {
-					qdb.Error("[TCPClientGateway::doHandleConnection] Failed to write to connection: %v", err)
+					qdb.Error("[TCPClientTransport::doHandleConnection] Failed to write to connection: %v", err)
 					return
 				}
 			}
@@ -161,7 +161,7 @@ func (c *TCPClientGateway) doHandleConnection() {
 		default:
 			n, err := c.conn.Read(tempBuf)
 			if err != nil {
-				qdb.Error("[TCPClientGateway::doHandleConnection] Failed to read from connection: %v", err)
+				qdb.Error("[TCPClientTransport::doHandleConnection] Failed to read from connection: %v", err)
 				return
 			}
 
@@ -169,7 +169,7 @@ func (c *TCPClientGateway) doHandleConnection() {
 
 			msg := &QdpMessage{}
 			remaining := msg.FromBytes(buffer.Bytes())
-			qdb.Trace("[TCPClientGateway::doHandleConnection] Received %d bytes: %s", n, msg)
+			qdb.Trace("[TCPClientTransport::doHandleConnection] Received %d bytes: %s", n, msg)
 
 			buffer.Reset()
 			buffer.Write(remaining)
@@ -185,19 +185,19 @@ func (c *TCPClientGateway) doHandleConnection() {
 	}
 }
 
-func (s *TCPServerGateway) Stop() {
-	qdb.Info("[TCPServerGateway::Stop] Stopping server: %s", s.addr)
+func (s *TCPServerTransport) Stop() {
+	qdb.Info("[TCPServerTransport::Stop] Stopping server: %s", s.addr)
 
 	s.quit <- nil
 }
 
-func (s *TCPServerGateway) Send(m *QdpMessage) {
+func (s *TCPServerTransport) Send(m *QdpMessage) {
 	m.Complete()
 
 	s.tx <- m
 }
 
-func (s *TCPServerGateway) Recv() *QdpMessage {
+func (s *TCPServerTransport) Recv() *QdpMessage {
 	select {
 	case m := <-s.rx:
 		return m
