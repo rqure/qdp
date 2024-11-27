@@ -290,10 +290,6 @@ TEST(topic_matching) {
     assert(qdp_topic_matches("+", "a"));
 }
 
-#if defined(__linux__) && defined(__ELF__)
-__asm__(".section .note.GNU-stack,\"\",@progbits");
-#endif
-
 int main(void) {
     RUN_TEST(buffer_operations);
     RUN_TEST(message_operations);

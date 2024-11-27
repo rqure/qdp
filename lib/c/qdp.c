@@ -305,7 +305,3 @@ bool qdp_topic_matches(const char* pattern, const char* topic) {
     return (*p == '\0' && *t == '\0') || 
            (*p == QDP_MULTI_LEVEL_WILDCARD && *(p + 1) == '\0');
 }
-
-#if defined(__linux__) && defined(__ELF__)
-__asm__(".section .note.GNU-stack,\"\",@progbits");
-#endif

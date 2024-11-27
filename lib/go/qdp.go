@@ -256,4 +256,79 @@ func (s *Stream) NextMessage(msg *Message) bool {
 	return s.ReadMessage(msg)
 }
 
-// ... existing helper functions and error definitions ...
+// Helper functions for binary operations
+func writeUint32(b []byte, v uint32) {
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
+}
+
+func readUint32(b []byte) uint32 {
+	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
+}
+
+// CRC32 calculation
+func crc32(data []byte) uint32 {
+	crc := uint32(0xFFFFFFFF)
+	for _, b := range data {
+		crc = (crc >> 8) ^ qdp_crc32_table[byte(crc)^b]
+	}
+	return crc ^ 0xFFFFFFFF
+}
+
+// Add to Stream type
+func (s *Stream) ReadMessage(msg *Message) bool {
+	if s.buffer.position >= s.buffer.size {
+		return false
+	}
+
+	// Read header
+	if !s.buffer.CanRead(8) { // size of two uint32s
+		return false
+	}
+
+	msg.Header.TopicLen = readUint32(s.buffer.data[s.buffer.position:])
+	s.buffer.position += 4
+	msg.Header.PayloadLen = readUint32(s.buffer.data[s.buffer.position:])
+	s.buffer.position += 4
+
+	// Read topic
+	if !s.buffer.CanRead(int(msg.Header.TopicLen)) {
+		return false
+	}
+	msg.Header.Topic = string(s.buffer.data[s.buffer.position : s.buffer.position+int(msg.Header.TopicLen)])
+	s.buffer.position += int(msg.Header.TopicLen)
+
+	// Read payload
+	if !s.buffer.CanRead(int(msg.Header.PayloadLen) + 4) { // payload + checksum
+		return false
+	}
+	msg.Payload.Data = make([]byte, msg.Header.PayloadLen)
+	copy(msg.Payload.Data, s.buffer.data[s.buffer.position:s.buffer.position+int(msg.Header.PayloadLen)])
+	msg.Payload.Size = msg.Header.PayloadLen
+	s.buffer.position += int(msg.Header.PayloadLen)
+
+	// Read and verify checksum
+	msg.Checksum = readUint32(s.buffer.data[s.buffer.position:])
+	s.buffer.position += 4
+
+	return true
+}
+
+// Initialize CRC table
+var qdp_crc32_table [256]uint32
+
+func init() {
+	for i := 0; i < 256; i++ {
+		crc := uint32(i)
+		for j := 0; j < 8; j++ {
+			if crc&1 != 0 {
+				crc = (crc >> 1) ^ 0xEDB88320
+			} else {
+				crc >>= 1
+			}
+		}
+		qdp_crc32_table[i] = crc
+	}
+}
