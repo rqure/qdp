@@ -4,9 +4,27 @@ import (
 	"bytes"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+type mockConnectionHandler struct {
+	connectCount    atomic.Int32
+	disconnectCount atomic.Int32
+	handleClient    func(ITransport)
+}
+
+func (h *mockConnectionHandler) OnConnect(transport ITransport) {
+	h.connectCount.Add(1)
+	if h.handleClient != nil {
+		h.handleClient(transport)
+	}
+}
+
+func (h *mockConnectionHandler) OnDisconnect(transport ITransport, err error) {
+	h.disconnectCount.Add(1)
+}
 
 func TestTCPClientTransport(t *testing.T) {
 	// Start test server
@@ -34,7 +52,7 @@ func TestTCPClientTransport(t *testing.T) {
 	}()
 
 	// Create client transport
-	client, err := NewTCPClientTransport(listener.Addr().String())
+	client, err := NewTCPClientTransport(listener.Addr().String(), nil)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -70,8 +88,8 @@ func TestTCPServerTransport(t *testing.T) {
 	var wg sync.WaitGroup
 	receivedData := make(chan []byte, 1)
 
-	// Create server
-	server, err := NewTCPServerTransport("127.0.0.1:0", func(transport ITransport) {
+	handler := &mockConnectionHandler{}
+	handler.handleClient = func(transport ITransport) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -83,7 +101,10 @@ func TestTCPServerTransport(t *testing.T) {
 			receivedData <- buf[:n]
 			transport.Write(buf[:n]) // Echo back
 		}()
-	})
+	}
+
+	// Create server
+	server, err := NewTCPServerTransport("127.0.0.1:0", handler)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -93,7 +114,7 @@ func TestTCPServerTransport(t *testing.T) {
 	addr := server.listener.Addr().String()
 
 	// Create client and send data
-	client, err := NewTCPClientTransport(addr)
+	client, err := NewTCPClientTransport(addr, nil)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
@@ -132,10 +153,14 @@ func TestMultipleClientConnections(t *testing.T) {
 	var clientsConnected sync.WaitGroup
 	clientsConnected.Add(numClients)
 
+	handler := &mockConnectionHandler{
+		handleClient: func(transport ITransport) {
+			clientsConnected.Done()
+		},
+	}
+
 	// Create server
-	server, err := NewTCPServerTransport("127.0.0.1:0", func(transport ITransport) {
-		clientsConnected.Done()
-	})
+	server, err := NewTCPServerTransport("127.0.0.1:0", handler)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
@@ -145,7 +170,7 @@ func TestMultipleClientConnections(t *testing.T) {
 	addr := server.listener.Addr().String()
 	for i := 0; i < numClients; i++ {
 		go func(id int) {
-			client, err := NewTCPClientTransport(addr)
+			client, err := NewTCPClientTransport(addr, nil)
 			if err != nil {
 				t.Errorf("Client %d failed to connect: %v", id, err)
 				return
@@ -168,3 +193,74 @@ func TestMultipleClientConnections(t *testing.T) {
 		t.Fatal("Timeout waiting for clients to connect")
 	}
 }
+
+func TestConnectionCallbacks(t *testing.T) {
+	handler := &mockConnectionHandler{}
+
+	// Start server
+	server, err := NewTCPServerTransport("127.0.0.1:0", handler)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer server.Close()
+
+	// Create client
+	client, err := NewTCPClientTransport(server.listener.Addr().String(), nil)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	// Wait for connect callback
+	time.Sleep(100 * time.Millisecond)
+	if got := handler.connectCount.Load(); got != 1 {
+		t.Errorf("Expected 1 connect callback, got %d", got)
+	}
+
+	// Close client and wait for disconnect
+	client.Close()
+	time.Sleep(100 * time.Millisecond)
+	if got := handler.disconnectCount.Load(); got != 1 {
+		t.Errorf("Expected 1 disconnect callback, got %d", got)
+	}
+}
+
+func TestConnectionHandlerFunc(t *testing.T) {
+	var connectCount, disconnectCount atomic.Int32
+
+	handler := ConnectionHandlerFunc{
+		OnConnectFunc: func(transport ITransport) {
+			connectCount.Add(1)
+		},
+		OnDisconnectFunc: func(transport ITransport, err error) {
+			disconnectCount.Add(1)
+		},
+	}
+
+	// Start server
+	server, err := NewTCPServerTransport("127.0.0.1:0", handler)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer server.Close()
+
+	// Create client
+	client, err := NewTCPClientTransport(server.listener.Addr().String(), nil)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+
+	// Wait for connect callback
+	time.Sleep(100 * time.Millisecond)
+	if got := connectCount.Load(); got != 1 {
+		t.Errorf("Expected 1 connect callback, got %d", got)
+	}
+
+	// Close client and wait for disconnect
+	client.Close()
+	time.Sleep(100 * time.Millisecond)
+	if got := disconnectCount.Load(); got != 1 {
+		t.Errorf("Expected 1 disconnect callback, got %d", got)
+	}
+}
+
+// ...existing code...

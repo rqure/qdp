@@ -22,14 +22,14 @@ func main() {
 
 	dbWorker := qdb.NewDatabaseWorker(db)
 	leaderElectionWorker := qdb.NewLeaderElectionWorker(db)
-	tcpTransportWorker := NewTCPTransportWorker(db)
+	messageBroker := NewMessageBroker(db)
 
 	schemaValidator := qdb.NewSchemaValidator(db)
 
 	schemaValidator.AddEntity("QdpController") // entity type
 
 	schemaValidator.AddEntity("QdpTcpTransport", // entity type
-		"Address", "IsClient", "IsEnabled", "IsConnected") // entity fields
+		"Address", "IsClient", "IsEnabled", "ActiveConnections") // entity fields
 
 	schemaValidator.AddEntity("QdpTopic", // entity type
 		"Topic", "TransportReference", "TxMessage", "RxMessage", "RxMessageFn") // entity fields
@@ -42,10 +42,10 @@ func main() {
 
 	dbWorker.Signals.Connected.Connect(qdb.Slot(leaderElectionWorker.OnDatabaseConnected))
 	dbWorker.Signals.Disconnected.Connect(qdb.Slot(leaderElectionWorker.OnDatabaseDisconnected))
-	dbWorker.Signals.SchemaUpdated.Connect(qdb.Slot(tcpTransportWorker.OnSchemaUpdated))
+	dbWorker.Signals.SchemaUpdated.Connect(qdb.Slot(messageBroker.OnSchemaUpdated))
 
-	leaderElectionWorker.Signals.BecameLeader.Connect(qdb.Slot(tcpTransportWorker.OnBecameLeader))
-	leaderElectionWorker.Signals.LosingLeadership.Connect(qdb.Slot(tcpTransportWorker.OnLostLeadership))
+	leaderElectionWorker.Signals.BecameLeader.Connect(qdb.Slot(messageBroker.OnBecameLeader))
+	leaderElectionWorker.Signals.LosingLeadership.Connect(qdb.Slot(messageBroker.OnLostLeadership))
 
 	// Create a new application configuration
 	config := qdb.ApplicationConfig{
@@ -53,7 +53,7 @@ func main() {
 		Workers: []qdb.IWorker{
 			dbWorker,
 			leaderElectionWorker,
-			tcpTransportWorker,
+			messageBroker,
 		},
 	}
 

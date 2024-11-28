@@ -15,6 +15,30 @@ var (
 	ErrCRCMismatch    = errors.New("CRC checksum mismatch")
 )
 
+// IConnectionHandler defines callbacks for transport connection status
+type IConnectionHandler interface {
+	OnConnect(transport ITransport)
+	OnDisconnect(transport ITransport, err error)
+}
+
+// ConnectionHandlerFunc is a function type that implements IConnectionHandler
+type ConnectionHandlerFunc struct {
+	OnConnectFunc    func(transport ITransport)
+	OnDisconnectFunc func(transport ITransport, err error)
+}
+
+func (h ConnectionHandlerFunc) OnConnect(transport ITransport) {
+	if h.OnConnectFunc != nil {
+		h.OnConnectFunc(transport)
+	}
+}
+
+func (h ConnectionHandlerFunc) OnDisconnect(transport ITransport, err error) {
+	if h.OnDisconnectFunc != nil {
+		h.OnDisconnectFunc(transport, err)
+	}
+}
+
 // ITransport defines the interface for different transport mechanisms
 type ITransport interface {
 	Read(p []byte) (n int, err error)
@@ -117,33 +141,49 @@ type subscription struct {
 	handler IMessageHandler
 }
 
-// SubscriptionManager handles topic subscriptions and message routing
-type SubscriptionManager struct {
+// ISubscriptionManager defines the interface for managing subscriptions
+type ISubscriptionManager interface {
+	Subscribe(topic string, handler IMessageHandler)
+	Unsubscribe(topic string, handler IMessageHandler)
+	HandleMessage(msg *Message)
+}
+
+// DefaultSubscriptionManager implements ISubscriptionManager
+type DefaultSubscriptionManager struct {
 	subscriptions []subscription
 	mu            sync.RWMutex
 }
 
-func newSubscriptionManager() *SubscriptionManager {
-	return &SubscriptionManager{
+func NewSubscriptionManager() ISubscriptionManager {
+	return &DefaultSubscriptionManager{
 		subscriptions: make([]subscription, 0),
 	}
 }
 
-// Subscribe adds a new subscription for a topic pattern
-func (sm *SubscriptionManager) Subscribe(topic string, handler IMessageHandler) {
+func (sm *DefaultSubscriptionManager) Subscribe(topic string, handler IMessageHandler) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.subscriptions = append(sm.subscriptions, subscription{topic, handler})
 }
 
-// Unsubscribe removes a subscription
-func (sm *SubscriptionManager) Unsubscribe(topic string, handler IMessageHandler) {
+func (sm *DefaultSubscriptionManager) Unsubscribe(topic string, handler IMessageHandler) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	for i := len(sm.subscriptions) - 1; i >= 0; i-- {
 		sub := sm.subscriptions[i]
 		if sub.topic == topic && sub.handler == handler {
 			sm.subscriptions = append(sm.subscriptions[:i], sm.subscriptions[i+1:]...)
+		}
+	}
+}
+
+func (sm *DefaultSubscriptionManager) HandleMessage(msg *Message) {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	for _, sub := range sm.subscriptions {
+		if matchTopic(sub.topic, msg.Topic) {
+			sub.handler.HandleMessage(msg)
 		}
 	}
 }
@@ -176,22 +216,45 @@ func matchTopic(pattern, topic string) bool {
 	return len(topicParts) == len(patternParts)
 }
 
-// Protocol handles reading and writing messages over a transport
-type Protocol struct {
+// IProtocol defines the interface for the QDP protocol implementation
+type IProtocol interface {
+	SetSubscriptionManager(manager ISubscriptionManager)
+	SendMessage(msg *Message) error
+	ReceiveMessage() (*Message, error)
+	Subscribe(topic string, handler IMessageHandler)
+	Unsubscribe(topic string, handler IMessageHandler)
+	PublishMessage(topic string, payload []byte) error
+	StartReceiving(ctx context.Context)
+	Close() error
+}
+
+// DefaultProtocol handles reading and writing messages over a transport
+type DefaultProtocol struct {
 	transport   ITransport
-	subscribers *SubscriptionManager
+	subscribers ISubscriptionManager
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
 }
 
 // NewProtocol creates a new Protocol instance
-func NewProtocol(transport ITransport) *Protocol {
-	return &Protocol{
+func NewProtocol(transport ITransport, subscribers ISubscriptionManager) IProtocol {
+	if subscribers == nil {
+		subscribers = NewSubscriptionManager()
+	}
+
+	return &DefaultProtocol{
 		transport:   transport,
-		subscribers: newSubscriptionManager(),
+		subscribers: subscribers,
 	}
 }
 
+// SetSubscriptionManager sets the subscription manager
+func (p *DefaultProtocol) SetSubscriptionManager(manager ISubscriptionManager) {
+	p.subscribers = manager
+}
+
 // SendMessage sends a message over the transport
-func (p *Protocol) SendMessage(msg *Message) error {
+func (p *DefaultProtocol) SendMessage(msg *Message) error {
 	data, err := msg.Encode()
 	if err != nil {
 		return err
@@ -201,7 +264,7 @@ func (p *Protocol) SendMessage(msg *Message) error {
 }
 
 // ReceiveMessage reads a message from the transport
-func (p *Protocol) ReceiveMessage() (*Message, error) {
+func (p *DefaultProtocol) ReceiveMessage() (*Message, error) {
 	// Read header first to determine message size
 	header := make([]byte, 8)
 	if _, err := io.ReadFull(p.transport, header); err != nil {
@@ -224,17 +287,17 @@ func (p *Protocol) ReceiveMessage() (*Message, error) {
 }
 
 // Subscribe adds a message handler for a topic pattern
-func (p *Protocol) Subscribe(topic string, handler IMessageHandler) {
+func (p *DefaultProtocol) Subscribe(topic string, handler IMessageHandler) {
 	p.subscribers.Subscribe(topic, handler)
 }
 
 // Unsubscribe removes a message handler for a topic pattern
-func (p *Protocol) Unsubscribe(topic string, handler IMessageHandler) {
+func (p *DefaultProtocol) Unsubscribe(topic string, handler IMessageHandler) {
 	p.subscribers.Unsubscribe(topic, handler)
 }
 
 // PublishMessage publishes a message to a topic
-func (p *Protocol) PublishMessage(topic string, payload []byte) error {
+func (p *DefaultProtocol) PublishMessage(topic string, payload []byte) error {
 	msg := &Message{
 		Topic:   topic,
 		Payload: payload,
@@ -243,20 +306,18 @@ func (p *Protocol) PublishMessage(topic string, payload []byte) error {
 }
 
 // handleMessage routes received messages to subscribers
-func (p *Protocol) handleMessage(msg *Message) {
-	p.subscribers.mu.RLock()
-	defer p.subscribers.mu.RUnlock()
-
-	for _, sub := range p.subscribers.subscriptions {
-		if matchTopic(sub.topic, msg.Topic) {
-			sub.handler.HandleMessage(msg)
-		}
-	}
+func (p *DefaultProtocol) handleMessage(msg *Message) {
+	p.subscribers.HandleMessage(msg)
 }
 
 // StartReceiving starts a goroutine to receive and handle messages
-func (p *Protocol) StartReceiving(ctx context.Context) {
+func (p *DefaultProtocol) StartReceiving(ctx context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
+	p.wg.Add(1)
+
 	go func() {
+		defer p.wg.Done()
 		for {
 			select {
 			case <-ctx.Done():
@@ -270,6 +331,15 @@ func (p *Protocol) StartReceiving(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// Close gracefully shuts down the protocol and its transport
+func (p *DefaultProtocol) Close() error {
+	if p.cancel != nil {
+		p.cancel()
+		p.wg.Wait()
+	}
+	return p.transport.Close()
 }
 
 var crc32Table [256]uint32

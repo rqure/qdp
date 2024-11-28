@@ -86,7 +86,7 @@ func TestMessageEncodeDecode(t *testing.T) {
 
 func TestProtocolSendReceive(t *testing.T) {
 	transport := newMockTransport()
-	protocol := NewProtocol(transport)
+	protocol := NewProtocol(transport, nil)
 
 	// Test message
 	msg := &Message{
@@ -143,7 +143,7 @@ func TestTopicMatching(t *testing.T) {
 
 func TestSubscription(t *testing.T) {
 	transport := newMockTransport()
-	protocol := NewProtocol(transport)
+	protocol := NewProtocol(transport, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -182,5 +182,78 @@ func TestSubscription(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Error("Timeout waiting for message")
+	}
+}
+
+func TestSharedSubscriptionManager(t *testing.T) {
+	sharedManager := NewSubscriptionManager()
+
+	transport1 := newMockTransport()
+	protocol1 := NewProtocol(transport1, sharedManager)
+
+	transport2 := newMockTransport()
+	protocol2 := NewProtocol(transport2, sharedManager)
+
+	received := make(chan *Message, 2)
+	handler := MessageHandlerFunc(func(msg *Message) {
+		received <- msg
+	})
+
+	// Subscribe using first protocol
+	protocol1.Subscribe("test/+", handler)
+
+	// Send message through second protocol
+	msg := &Message{
+		Topic:   "test/shared",
+		Payload: []byte("hello"),
+	}
+
+	if err := protocol2.SendMessage(msg); err != nil {
+		t.Fatalf("SendMessage() error = %v", err)
+	}
+
+	transport2.readBuf.Write(transport2.writeBuf.Bytes())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	protocol2.StartReceiving(ctx)
+
+	// Wait for message
+	select {
+	case receivedMsg := <-received:
+		if receivedMsg.Topic != msg.Topic {
+			t.Errorf("Topic mismatch: got %v, want %v", receivedMsg.Topic, msg.Topic)
+		}
+	case <-time.After(time.Second):
+		t.Error("Timeout waiting for message")
+	}
+}
+
+func TestProtocolGracefulClose(t *testing.T) {
+	transport := newMockTransport()
+	protocol := NewProtocol(transport, nil)
+
+	ctx := context.Background()
+	protocol.StartReceiving(ctx)
+
+	// Add a small delay to ensure goroutine is running
+	time.Sleep(100 * time.Millisecond)
+
+	// Close should complete without blocking
+	done := make(chan struct{})
+	go func() {
+		err := protocol.Close()
+		if err != nil {
+			t.Errorf("Close() error = %v", err)
+		}
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Success - close completed
+	case <-time.After(time.Second):
+		t.Error("Close() timed out")
 	}
 }
