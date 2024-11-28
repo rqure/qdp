@@ -1,334 +1,299 @@
 package qdp
 
 import (
+	"context"
+	"encoding/binary"
 	"errors"
+	"io"
 	"strings"
+	"sync"
 )
 
-const (
-	MaxBufferCapacity = 1024 * 10
-	MaxSubscriptions  = 64
-	MaxTopicLength    = 256
-	MaxPayloadSize    = 512
-)
-
-// Topic pattern matching special characters
-const (
-	SingleLevelWildcard = '+'
-	MultiLevelWildcard  = '#'
-	TopicLevelSeparator = '/'
-)
-
-// Buffer management
-type Buffer struct {
-	data     []byte
-	size     int
-	capacity int
-	position int
-}
-
-// Message components
-type Header struct {
-	TopicLen   uint32
-	PayloadLen uint32
-	Topic      string
-}
-
-type Payload struct {
-	Size uint32
-	Data []byte
-}
-
-type Message struct {
-	Header   Header
-	Payload  Payload
-	Checksum uint32
-}
-
-// Stream context
-type Stream struct {
-	buffer Buffer
-}
-
-// Callback system
-type Callback struct {
-	Fn  func(*Message, interface{})
-	Ctx interface{}
-}
-
-type Subscription struct {
-	Topic    string
-	Callback Callback
-}
-
-// Protocol errors
+// Common errors
 var (
-	ErrBufferFull      = errors.New("buffer full")
-	ErrPayloadTooLarge = errors.New("payload too large")
+	ErrInvalidMessage = errors.New("invalid message format")
+	ErrCRCMismatch    = errors.New("CRC checksum mismatch")
 )
 
-// Main context
-type QDP struct {
-	transport struct {
-		send func(*Buffer, interface{}) error
-		recv func(*Buffer, interface{}) error
-		ctx  interface{}
+// ITransport defines the interface for different transport mechanisms
+type ITransport interface {
+	Read(p []byte) (n int, err error)
+	Write(p []byte) (n int, err error)
+	Close() error
+}
+
+// Message represents a QDP protocol message
+type Message struct {
+	Topic   string
+	Payload []byte
+}
+
+// Encode serializes a Message into a byte slice with CRC
+func (m *Message) Encode() ([]byte, error) {
+	if m.Topic == "" {
+		return nil, ErrInvalidMessage
 	}
 
-	subs   []Subscription
-	rx     Stream
-	tx     Stream
-	rxData []byte
-	txData []byte
+	topicLen := uint32(len(m.Topic))
+	payloadLen := uint32(len(m.Payload))
+
+	// Calculate total message size
+	totalSize := 8 + // TopicLength + PayloadLength fields
+		topicLen +
+		payloadLen +
+		4 // CRC32
+
+	buf := make([]byte, totalSize)
+	offset := 0
+
+	// Write header
+	binary.LittleEndian.PutUint32(buf[offset:], topicLen)
+	offset += 4
+	binary.LittleEndian.PutUint32(buf[offset:], payloadLen)
+	offset += 4
+
+	// Write topic
+	copy(buf[offset:], m.Topic)
+	offset += int(topicLen)
+
+	// Write payload
+	copy(buf[offset:], m.Payload)
+	offset += int(payloadLen)
+
+	// Calculate and write CRC
+	crc := calculateCRC32(buf[:offset])
+	binary.LittleEndian.PutUint32(buf[offset:], crc)
+
+	return buf, nil
 }
 
-// Create new QDP instance
-func New() *QDP {
-	q := &QDP{
-		subs:   make([]Subscription, 0, MaxSubscriptions),
-		rxData: make([]byte, MaxBufferCapacity),
-		txData: make([]byte, MaxBufferCapacity),
+// Decode deserializes a byte slice into a Message, verifying CRC
+func Decode(data []byte) (*Message, error) {
+	if len(data) < 12 { // minimum size: 4 + 4 + 0 + 0 + 4 (lengths + CRC)
+		return nil, ErrInvalidMessage
 	}
-	q.rx.buffer.data = q.rxData
-	q.rx.buffer.capacity = MaxBufferCapacity
-	q.tx.buffer.data = q.txData
-	q.tx.buffer.capacity = MaxBufferCapacity
-	return q
-}
 
-// Set transport functions
-func (q *QDP) SetTransport(send func(*Buffer, interface{}) error,
-	recv func(*Buffer, interface{}) error,
-	ctx interface{}) {
-	q.transport.send = send
-	q.transport.recv = recv
-	q.transport.ctx = ctx
-}
+	// Read header
+	topicLen := binary.LittleEndian.Uint32(data[0:4])
+	payloadLen := binary.LittleEndian.Uint32(data[4:8])
 
-// Subscribe to a topic pattern
-func (q *QDP) Subscribe(pattern string, fn func(*Message, interface{}), ctx interface{}) bool {
-	if len(q.subs) >= MaxSubscriptions {
-		return false
+	totalLen := 8 + topicLen + payloadLen + 4
+	if uint32(len(data)) != totalLen {
+		return nil, ErrInvalidMessage
 	}
-	q.subs = append(q.subs, Subscription{
-		Topic:    pattern,
-		Callback: Callback{Fn: fn, Ctx: ctx},
-	})
-	return true
+
+	// Verify CRC
+	receivedCRC := binary.LittleEndian.Uint32(data[totalLen-4:])
+	calculatedCRC := calculateCRC32(data[:totalLen-4])
+	if receivedCRC != calculatedCRC {
+		return nil, ErrCRCMismatch
+	}
+
+	// Extract topic and payload
+	topic := string(data[8 : 8+topicLen])
+	payload := data[8+topicLen : totalLen-4]
+
+	return &Message{
+		Topic:   topic,
+		Payload: payload,
+	}, nil
 }
 
-// Unsubscribe from a topic pattern
-func (q *QDP) Unsubscribe(pattern string) {
-	for i := 0; i < len(q.subs); i++ {
-		if q.subs[i].Topic == pattern {
-			q.subs = append(q.subs[:i], q.subs[i+1:]...)
-			i--
+// IMessageHandler defines callback interface for message handlers
+type IMessageHandler interface {
+	HandleMessage(msg *Message)
+}
+
+// MessageHandlerFunc is a function type that implements IMessageHandler
+type MessageHandlerFunc func(msg *Message)
+
+func (f MessageHandlerFunc) HandleMessage(msg *Message) {
+	f(msg)
+}
+
+// Subscription represents a topic subscription
+type subscription struct {
+	topic   string
+	handler IMessageHandler
+}
+
+// SubscriptionManager handles topic subscriptions and message routing
+type SubscriptionManager struct {
+	subscriptions []subscription
+	mu            sync.RWMutex
+}
+
+func newSubscriptionManager() *SubscriptionManager {
+	return &SubscriptionManager{
+		subscriptions: make([]subscription, 0),
+	}
+}
+
+// Subscribe adds a new subscription for a topic pattern
+func (sm *SubscriptionManager) Subscribe(topic string, handler IMessageHandler) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.subscriptions = append(sm.subscriptions, subscription{topic, handler})
+}
+
+// Unsubscribe removes a subscription
+func (sm *SubscriptionManager) Unsubscribe(topic string, handler IMessageHandler) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	for i := len(sm.subscriptions) - 1; i >= 0; i-- {
+		sub := sm.subscriptions[i]
+		if sub.topic == topic && sub.handler == handler {
+			sm.subscriptions = append(sm.subscriptions[:i], sm.subscriptions[i+1:]...)
 		}
 	}
 }
 
-// Publish string message
-func (q *QDP) PublishString(topic string, str string) error {
-	if len(str) > MaxPayloadSize {
-		return ErrPayloadTooLarge
-	}
-
-	msg := Message{
-		Header: Header{
-			TopicLen:   uint32(len(topic)),
-			PayloadLen: uint32(len(str)),
-			Topic:      topic,
-		},
-		Payload: Payload{
-			Size: uint32(len(str)),
-			Data: []byte(str),
-		},
-	}
-
-	q.tx.buffer.Reset()
-	if err := q.tx.WriteMessage(&msg); err != nil {
-		return err
-	}
-
-	if q.transport.send != nil {
-		return q.transport.send(&q.tx.buffer, q.transport.ctx)
-	}
-	return nil
-}
-
-// Process incoming messages
-func (q *QDP) Process() error {
-	if q.transport.recv == nil {
-		return nil
-	}
-
-	q.rx.buffer.Reset()
-	if err := q.transport.recv(&q.rx.buffer, q.transport.ctx); err != nil {
-		return err
-	}
-
-	var msg Message
-	for q.rx.NextMessage(&msg) {
-		// Match against subscriptions
-		for _, sub := range q.subs {
-			if TopicMatches(sub.Topic, msg.Header.Topic) {
-				sub.Callback.Fn(&msg, sub.Callback.Ctx)
-			}
-		}
-	}
-	return nil
-}
-
-// Topic pattern matching
-func TopicMatches(pattern, topic string) bool {
+// matchTopic checks if a topic matches a pattern with wildcards
+func matchTopic(pattern, topic string) bool {
 	if pattern == "#" {
 		return true
 	}
 
-	parts := strings.Split(pattern, string(TopicLevelSeparator))
-	topics := strings.Split(topic, string(TopicLevelSeparator))
+	patternParts := strings.Split(pattern, "/")
+	topicParts := strings.Split(topic, "/")
 
-	if len(parts) > len(topics) && parts[len(parts)-1] != "#" {
+	if len(patternParts) > len(topicParts) && patternParts[len(patternParts)-1] != "#" {
 		return false
 	}
 
-	for i := 0; i < len(parts); i++ {
-		if i >= len(topics) {
+	for i := 0; i < len(patternParts); i++ {
+		if i >= len(topicParts) {
 			return false
 		}
-
-		if parts[i] == "#" {
-			return i == len(parts)-1
+		if patternParts[i] == "#" {
+			return true
 		}
-
-		if parts[i] != "+" && parts[i] != topics[i] {
+		if patternParts[i] != "+" && patternParts[i] != topicParts[i] {
 			return false
 		}
 	}
 
-	return len(parts) == len(topics) ||
-		(len(parts) == len(topics)-1 && parts[len(parts)-1] == "#")
+	return len(topicParts) == len(patternParts)
 }
 
-// Buffer methods
-func (b *Buffer) Reset() {
-	b.size = 0
-	b.position = 0
+// Protocol handles reading and writing messages over a transport
+type Protocol struct {
+	transport   ITransport
+	subscribers *SubscriptionManager
 }
 
-func (b *Buffer) CanRead(bytes int) bool {
-	return b.position+bytes <= b.size
+// NewProtocol creates a new Protocol instance
+func NewProtocol(transport ITransport) *Protocol {
+	return &Protocol{
+		transport:   transport,
+		subscribers: newSubscriptionManager(),
+	}
 }
 
-func (b *Buffer) CanWrite(bytes int) bool {
-	return b.size+bytes <= b.capacity
+// SendMessage sends a message over the transport
+func (p *Protocol) SendMessage(msg *Message) error {
+	data, err := msg.Encode()
+	if err != nil {
+		return err
+	}
+	_, err = p.transport.Write(data)
+	return err
 }
 
-// Stream methods
-func (s *Stream) WriteMessage(msg *Message) error {
-	totalSize := 4 + 4 + len(msg.Header.Topic) + len(msg.Payload.Data) + 4
-	if !s.buffer.CanWrite(totalSize) {
-		return ErrBufferFull
+// ReceiveMessage reads a message from the transport
+func (p *Protocol) ReceiveMessage() (*Message, error) {
+	// Read header first to determine message size
+	header := make([]byte, 8)
+	if _, err := io.ReadFull(p.transport, header); err != nil {
+		return nil, err
 	}
 
-	// Write message
-	writeUint32(s.buffer.data[s.buffer.size:], msg.Header.TopicLen)
-	s.buffer.size += 4
-	writeUint32(s.buffer.data[s.buffer.size:], uint32(len(msg.Payload.Data)))
-	s.buffer.size += 4
-	copy(s.buffer.data[s.buffer.size:], msg.Header.Topic)
-	s.buffer.size += len(msg.Header.Topic)
-	copy(s.buffer.data[s.buffer.size:], msg.Payload.Data)
-	s.buffer.size += len(msg.Payload.Data)
+	topicLen := binary.LittleEndian.Uint32(header[0:4])
+	payloadLen := binary.LittleEndian.Uint32(header[4:8])
 
-	// Calculate and write checksum
-	checksum := crc32(s.buffer.data[:s.buffer.size])
-	writeUint32(s.buffer.data[s.buffer.size:], checksum)
-	s.buffer.size += 4
+	// Read the rest of the message
+	remainingLen := topicLen + payloadLen + 4 // +4 for CRC
+	data := make([]byte, 8+remainingLen)
+	copy(data, header)
 
-	return nil
-}
-
-func (s *Stream) NextMessage(msg *Message) bool {
-	if s.buffer.position >= s.buffer.size {
-		return false
-	}
-	return s.ReadMessage(msg)
-}
-
-// Helper functions for binary operations
-func writeUint32(b []byte, v uint32) {
-	b[0] = byte(v)
-	b[1] = byte(v >> 8)
-	b[2] = byte(v >> 16)
-	b[3] = byte(v >> 24)
-}
-
-func readUint32(b []byte) uint32 {
-	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
-}
-
-// CRC32 calculation
-func crc32(data []byte) uint32 {
-	crc := uint32(0xFFFFFFFF)
-	for _, b := range data {
-		crc = (crc >> 8) ^ qdp_crc32_table[byte(crc)^b]
-	}
-	return crc ^ 0xFFFFFFFF
-}
-
-// Add to Stream type
-func (s *Stream) ReadMessage(msg *Message) bool {
-	if s.buffer.position >= s.buffer.size {
-		return false
+	if _, err := io.ReadFull(p.transport, data[8:]); err != nil {
+		return nil, err
 	}
 
-	// Read header
-	if !s.buffer.CanRead(8) { // size of two uint32s
-		return false
-	}
-
-	msg.Header.TopicLen = readUint32(s.buffer.data[s.buffer.position:])
-	s.buffer.position += 4
-	msg.Header.PayloadLen = readUint32(s.buffer.data[s.buffer.position:])
-	s.buffer.position += 4
-
-	// Read topic
-	if !s.buffer.CanRead(int(msg.Header.TopicLen)) {
-		return false
-	}
-	msg.Header.Topic = string(s.buffer.data[s.buffer.position : s.buffer.position+int(msg.Header.TopicLen)])
-	s.buffer.position += int(msg.Header.TopicLen)
-
-	// Read payload
-	if !s.buffer.CanRead(int(msg.Header.PayloadLen) + 4) { // payload + checksum
-		return false
-	}
-	msg.Payload.Data = make([]byte, msg.Header.PayloadLen)
-	copy(msg.Payload.Data, s.buffer.data[s.buffer.position:s.buffer.position+int(msg.Header.PayloadLen)])
-	msg.Payload.Size = msg.Header.PayloadLen
-	s.buffer.position += int(msg.Header.PayloadLen)
-
-	// Read and verify checksum
-	msg.Checksum = readUint32(s.buffer.data[s.buffer.position:])
-	s.buffer.position += 4
-
-	return true
+	return Decode(data)
 }
 
-// Initialize CRC table
-var qdp_crc32_table [256]uint32
+// Subscribe adds a message handler for a topic pattern
+func (p *Protocol) Subscribe(topic string, handler IMessageHandler) {
+	p.subscribers.Subscribe(topic, handler)
+}
+
+// Unsubscribe removes a message handler for a topic pattern
+func (p *Protocol) Unsubscribe(topic string, handler IMessageHandler) {
+	p.subscribers.Unsubscribe(topic, handler)
+}
+
+// PublishMessage publishes a message to a topic
+func (p *Protocol) PublishMessage(topic string, payload []byte) error {
+	msg := &Message{
+		Topic:   topic,
+		Payload: payload,
+	}
+	return p.SendMessage(msg)
+}
+
+// handleMessage routes received messages to subscribers
+func (p *Protocol) handleMessage(msg *Message) {
+	p.subscribers.mu.RLock()
+	defer p.subscribers.mu.RUnlock()
+
+	for _, sub := range p.subscribers.subscriptions {
+		if matchTopic(sub.topic, msg.Topic) {
+			sub.handler.HandleMessage(msg)
+		}
+	}
+}
+
+// StartReceiving starts a goroutine to receive and handle messages
+func (p *Protocol) StartReceiving(ctx context.Context) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				msg, err := p.ReceiveMessage()
+				if err != nil {
+					continue
+				}
+				p.handleMessage(msg)
+			}
+		}
+	}()
+}
+
+var crc32Table [256]uint32
 
 func init() {
-	for i := 0; i < 256; i++ {
-		crc := uint32(i)
+	// Initialize CRC32 table
+	polynomial := uint32(0xEDB88320)
+	for i := uint32(0); i < 256; i++ {
+		crc := i
 		for j := 0; j < 8; j++ {
 			if crc&1 != 0 {
-				crc = (crc >> 1) ^ 0xEDB88320
+				crc = (crc >> 1) ^ polynomial
 			} else {
 				crc >>= 1
 			}
 		}
-		qdp_crc32_table[i] = crc
+		crc32Table[i] = crc
 	}
+}
+
+func calculateCRC32(data []byte) uint32 {
+	crc := uint32(0xFFFFFFFF)
+	for _, b := range data {
+		crc = (crc >> 8) ^ crc32Table[byte(crc)^b]
+	}
+	return crc ^ 0xFFFFFFFF
 }

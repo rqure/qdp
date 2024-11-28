@@ -1,175 +1,109 @@
 package qdp
 
 import (
-	"context"
+	"fmt"
 	"io"
 	"net"
 	"sync"
 )
 
-type TCPServerTransport struct {
-	addr     string
-	listener net.Listener
-	clients  sync.Map
-	wg       sync.WaitGroup
-	ctx      context.Context
-	cancel   context.CancelFunc
-}
-
+// TCPClientTransport implements ITransport for TCP client connections
 type TCPClientTransport struct {
-	conn   net.Conn
-	ctx    context.Context
-	cancel context.CancelFunc
+	conn net.Conn
+	mu   sync.Mutex
 }
 
-func NewTCPServerTransport(addr string) *TCPServerTransport {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &TCPServerTransport{
-		addr:   addr,
-		ctx:    ctx,
-		cancel: cancel,
-	}
-}
-
-func NewTCPClientTransport(addr string) (*TCPClientTransport, error) {
-	conn, err := net.Dial("tcp", addr)
+// NewTCPClientTransport creates a new TCP client transport by dialing a server
+func NewTCPClientTransport(address string) (*TCPClientTransport, error) {
+	conn, err := net.Dial("tcp", address)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to dial: %w", err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	client := &TCPClientTransport{
-		conn:   conn,
-		ctx:    ctx,
-		cancel: cancel,
-	}
-
-	return client, nil
+	return &TCPClientTransport{conn: conn}, nil
 }
 
-func (s *TCPServerTransport) Start() error {
-	l, err := net.Listen("tcp", s.addr)
+// NewTCPClientTransportFromConn creates a new TCP client transport from existing connection
+func NewTCPClientTransportFromConn(conn net.Conn) *TCPClientTransport {
+	return &TCPClientTransport{conn: conn}
+}
+
+func (t *TCPClientTransport) Read(p []byte) (n int, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.conn.Read(p)
+}
+
+func (t *TCPClientTransport) Write(p []byte) (n int, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.conn.Write(p)
+}
+
+func (t *TCPClientTransport) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.conn.Close()
+}
+
+// TCPServerTransport implements a TCP server that creates client transports
+type TCPServerTransport struct {
+	listener    net.Listener
+	onNewClient func(ITransport)
+	done        chan struct{}
+	wg          sync.WaitGroup
+}
+
+// NewTCPServerTransport creates a new TCP server transport
+func NewTCPServerTransport(address string, onNewClient func(ITransport)) (*TCPServerTransport, error) {
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("failed to listen: %w", err)
 	}
-	s.listener = l
 
-	s.wg.Add(1)
-	go s.acceptLoop()
-	return nil
+	server := &TCPServerTransport{
+		listener:    listener,
+		onNewClient: onNewClient,
+		done:        make(chan struct{}),
+	}
+
+	server.wg.Add(1)
+	go server.acceptLoop()
+
+	return server, nil
 }
 
-func (s *TCPServerTransport) Stop() {
-	if s.cancel != nil {
-		s.cancel()
-	}
-	if s.listener != nil {
-		s.listener.Close()
-	}
-	s.wg.Wait()
-}
-
-func (s *TCPServerTransport) acceptLoop() {
-	defer s.wg.Done()
+func (t *TCPServerTransport) acceptLoop() {
+	defer t.wg.Done()
 
 	for {
 		select {
-		case <-s.ctx.Done():
+		case <-t.done:
 			return
 		default:
-			conn, err := s.listener.Accept()
+			conn, err := t.listener.Accept()
 			if err != nil {
+				if !isClosedError(err) {
+					// Log error if needed
+				}
 				continue
 			}
 
-			client := &TCPClientTransport{
-				conn: conn,
+			transport := NewTCPClientTransportFromConn(conn)
+			if t.onNewClient != nil {
+				t.onNewClient(transport)
 			}
-
-			s.clients.Store(conn.RemoteAddr().String(), client)
-			s.wg.Add(1)
-			go s.handleClient(client)
 		}
 	}
 }
 
-func (s *TCPServerTransport) handleClient(client *TCPClientTransport) {
-	defer s.wg.Done()
-	defer s.clients.Delete(client.conn.RemoteAddr().String())
-	defer client.conn.Close()
-
-	stream := Stream{
-		buffer: Buffer{
-			data:     make([]byte, MaxBufferCapacity),
-			capacity: MaxBufferCapacity,
-		},
-	}
-
-	for {
-		select {
-		case <-s.ctx.Done():
-			return
-		default:
-			stream.buffer.Reset()
-			if err := readQDPMessage(client.conn, &stream.buffer); err != nil {
-				return
-			}
-
-			// Echo back to all connected clients
-			s.clients.Range(func(_, value interface{}) bool {
-				c := value.(*TCPClientTransport)
-				writeQDPMessage(c.conn, &stream.buffer)
-				return true
-			})
-		}
-	}
-}
-
-func readQDPMessage(conn net.Conn, buf *Buffer) error {
-	header := make([]byte, 8)
-	if _, err := io.ReadFull(conn, header); err != nil {
-		return err
-	}
-
-	topicLen := int(readUint32(header[0:]))
-	payloadLen := int(readUint32(header[4:]))
-
-	if topicLen > MaxTopicLength || payloadLen > MaxPayloadSize {
-		return ErrPayloadTooLarge
-	}
-
-	// Copy header to buffer
-	copy(buf.data[buf.size:], header)
-	buf.size += 8
-
-	// Read message data
-	totalLen := topicLen + payloadLen + 4 // +4 for checksum
-	if _, err := io.ReadFull(conn, buf.data[buf.size:buf.size+totalLen]); err != nil {
-		return err
-	}
-	buf.size += totalLen
-
-	return nil
-}
-
-func writeQDPMessage(conn net.Conn, buf *Buffer) error {
-	_, err := conn.Write(buf.data[:buf.size])
+func (t *TCPServerTransport) Close() error {
+	close(t.done)
+	err := t.listener.Close()
+	t.wg.Wait()
 	return err
 }
 
-func (c *TCPClientTransport) Send(buf *Buffer, _ interface{}) error {
-	return writeQDPMessage(c.conn, buf)
-}
-
-func (c *TCPClientTransport) Receive(buf *Buffer, _ interface{}) error {
-	return readQDPMessage(c.conn, buf)
-}
-
-func (c *TCPClientTransport) Close() {
-	if c.cancel != nil {
-		c.cancel()
-	}
-	if c.conn != nil {
-		c.conn.Close()
-	}
+// isClosedError checks if the error is due to closed connection/listener
+func isClosedError(err error) bool {
+	return err == io.EOF || err == net.ErrClosed
 }

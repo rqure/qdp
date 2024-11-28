@@ -2,266 +2,185 @@ package qdp
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"testing"
+	"time"
 )
 
-// Mock transport for testing
+// mockTransport implements ITransport for testing
 type mockTransport struct {
-	data []byte
-	size int
+	readBuf  *bytes.Buffer
+	writeBuf *bytes.Buffer
 }
 
-func (m *mockTransport) send(buf *Buffer, _ interface{}) error {
-	if m.size+buf.size > len(m.data) {
-		return ErrBufferFull
-	}
-	copy(m.data[m.size:], buf.data[:buf.size])
-	m.size = buf.size
-	buf.size = 0
-	return nil
-}
-
-func (m *mockTransport) recv(buf *Buffer, _ interface{}) error {
-	if m.size == 0 {
-		return ErrBufferFull
-	}
-	copy(buf.data, m.data[:m.size])
-	buf.size = m.size
-	buf.position = 0
-	m.size = 0
-	return nil
-}
-
-// Buffer tests
-func TestBufferOperations(t *testing.T) {
-	data := make([]byte, 128)
-	buf := Buffer{
-		data:     data,
-		size:     0,
-		capacity: len(data),
-		position: 0,
-	}
-
-	if !buf.CanWrite(64) {
-		t.Error("Should be able to write 64 bytes")
-	}
-	if !buf.CanWrite(128) {
-		t.Error("Should be able to write 128 bytes")
-	}
-	if buf.CanWrite(129) {
-		t.Error("Should not be able to write 129 bytes")
-	}
-
-	buf.size = 100
-	if !buf.CanRead(50) {
-		t.Error("Should be able to read 50 bytes")
-	}
-	if !buf.CanRead(100) {
-		t.Error("Should be able to read 100 bytes")
-	}
-	if buf.CanRead(101) {
-		t.Error("Should not be able to read 101 bytes")
-	}
-
-	buf.Reset()
-	if buf.size != 0 || buf.position != 0 {
-		t.Error("Buffer reset failed")
+func newMockTransport() *mockTransport {
+	return &mockTransport{
+		readBuf:  bytes.NewBuffer(nil),
+		writeBuf: bytes.NewBuffer(nil),
 	}
 }
 
-// Message tests
-func TestMessageOperations(t *testing.T) {
-	buffer := make([]byte, 1024)
-	stream := Stream{
-		buffer: Buffer{
-			data:     buffer,
-			capacity: len(buffer),
+func (m *mockTransport) Read(p []byte) (n int, err error)  { return m.readBuf.Read(p) }
+func (m *mockTransport) Write(p []byte) (n int, err error) { return m.writeBuf.Write(p) }
+func (m *mockTransport) Close() error                      { return nil }
+
+func TestMessageEncodeDecode(t *testing.T) {
+	tests := []struct {
+		name    string
+		message Message
+		wantErr bool
+	}{
+		{
+			name: "basic message",
+			message: Message{
+				Topic:   "temperature",
+				Payload: []byte("25.5"),
+			},
+			wantErr: false,
+		},
+		{
+			name: "empty payload",
+			message: Message{
+				Topic:   "status",
+				Payload: []byte{},
+			},
+			wantErr: false,
+		},
+		{
+			name: "empty topic",
+			message: Message{
+				Topic:   "",
+				Payload: []byte("data"),
+			},
+			wantErr: true,
 		},
 	}
 
-	topic := "test/topic"
-	payload := []byte("test payload")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded, err := tt.message.Encode()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Message.Encode() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
 
-	msg := Message{
-		Header: Header{
-			TopicLen:   uint32(len(topic)),
-			PayloadLen: uint32(len(payload)),
-			Topic:      topic,
-		},
-		Payload: Payload{
-			Size: uint32(len(payload)),
-			Data: make([]byte, len(payload)),
-		},
+			decoded, err := Decode(encoded)
+			if err != nil {
+				t.Errorf("Decode() error = %v", err)
+				return
+			}
+
+			if decoded.Topic != tt.message.Topic {
+				t.Errorf("Topic mismatch: got %v, want %v", decoded.Topic, tt.message.Topic)
+			}
+			if !bytes.Equal(decoded.Payload, tt.message.Payload) {
+				t.Errorf("Payload mismatch: got %v, want %v", decoded.Payload, tt.message.Payload)
+			}
+		})
 	}
-	copy(msg.Payload.Data, payload)
+}
 
-	err := stream.WriteMessage(&msg)
+func TestProtocolSendReceive(t *testing.T) {
+	transport := newMockTransport()
+	protocol := NewProtocol(transport)
+
+	// Test message
+	msg := &Message{
+		Topic:   "test",
+		Payload: []byte("hello"),
+	}
+
+	// Send message
+	if err := protocol.SendMessage(msg); err != nil {
+		t.Fatalf("SendMessage() error = %v", err)
+	}
+
+	// Copy written data to read buffer for simulation
+	transport.readBuf.Write(transport.writeBuf.Bytes())
+
+	// Receive message
+	received, err := protocol.ReceiveMessage()
 	if err != nil {
-		t.Fatalf("Failed to write message: %v", err)
+		t.Fatalf("ReceiveMessage() error = %v", err)
 	}
 
-	var readMsg Message
-	readMsg.Payload.Data = make([]byte, MaxPayloadSize) // Pre-allocate payload buffer
-	stream.buffer.position = 0
-	if !stream.ReadMessage(&readMsg) {
-		t.Fatal("Failed to read message")
+	// Verify received message
+	if received.Topic != msg.Topic {
+		t.Errorf("Topic mismatch: got %v, want %v", received.Topic, msg.Topic)
 	}
-
-	if msg.Header.Topic != readMsg.Header.Topic {
-		t.Errorf("Topic mismatch: got %q, want %q", readMsg.Header.Topic, msg.Header.Topic)
-	}
-	if !bytes.Equal(msg.Payload.Data[:msg.Payload.Size], readMsg.Payload.Data[:readMsg.Payload.Size]) {
-		t.Errorf("Payload mismatch: got %q, want %q",
-			readMsg.Payload.Data[:readMsg.Payload.Size],
-			msg.Payload.Data[:msg.Payload.Size])
+	if !bytes.Equal(received.Payload, msg.Payload) {
+		t.Errorf("Payload mismatch: got %v, want %v", received.Payload, msg.Payload)
 	}
 }
 
-// Protocol tests
-func TestProtocolPubSub(t *testing.T) {
-	q := New()
-	mock := &mockTransport{
-		data: make([]byte, 1024),
-	}
-
-	var receivedMsg Message
-	callbackCalled := false
-
-	callback := func(msg *Message, _ interface{}) {
-		receivedMsg = *msg
-		callbackCalled = true
-	}
-
-	q.SetTransport(mock.send, mock.recv, nil)
-	if !q.Subscribe("test/topic", callback, nil) {
-		t.Fatal("Failed to subscribe")
-	}
-
-	if err := q.PublishString("test/topic", "Hello"); err != nil {
-		t.Fatalf("Failed to publish: %v", err)
-	}
-
-	if err := q.Process(); err != nil {
-		t.Fatalf("Failed to process: %v", err)
-	}
-
-	if !callbackCalled {
-		t.Error("Callback was not called")
-	}
-
-	payload := string(receivedMsg.Payload.Data[:receivedMsg.Payload.Size])
-	if payload != "Hello" {
-		t.Errorf("Expected 'Hello', got '%s'", payload)
-	}
-}
-
-// Topic pattern matching tests
 func TestTopicMatching(t *testing.T) {
 	tests := []struct {
 		pattern string
 		topic   string
 		matches bool
 	}{
-		// Exact matches
-		{"a/b/c", "a/b/c", true},
-		{"a/b/c", "a/b/d", false},
-
-		// Single-level wildcard
-		{"a/+/c", "a/b/c", true},
-		{"a/+/+", "a/b/c", true},
-		{"a/+/c", "a/b/d", false},
-		{"a/+/c", "a/b/c/d", false},
-
-		// Multi-level wildcard
-		{"a/#", "a/b/c", true},
-		{"a/b/#", "a/b/c/d", true},
-		{"a/#/c", "a/b/c", false}, // Invalid pattern
-
-		// Mixed wildcards
-		{"a/+/+/#", "a/b/c/d/e", true},
-		{"a/+/+/#", "a/b", false},
-
-		// Edge cases
-		{"", "a/b/c", false},
-		{"a/b/c", "", false},
-		{"#", "a/b/c", true},
-		{"+", "a", true},
+		{"sensor/temp", "sensor/temp", true},
+		{"sensor/+/temp", "sensor/1/temp", true},
+		{"sensor/+/temp", "sensor/2/temp", true},
+		{"sensor/+/temp", "sensor/temp", false},
+		{"sensor/#", "sensor/temp", true},
+		{"sensor/#", "sensor/temp/value", true},
+		{"sensor/+/temp", "sensor/1/humidity", false},
 	}
 
 	for _, tt := range tests {
-		result := TopicMatches(tt.pattern, tt.topic)
-		if result != tt.matches {
-			t.Errorf("TopicMatches(%q, %q) = %v; want %v",
-				tt.pattern, tt.topic, result, tt.matches)
-		}
+		t.Run(fmt.Sprintf("%s-%s", tt.pattern, tt.topic), func(t *testing.T) {
+			if got := matchTopic(tt.pattern, tt.topic); got != tt.matches {
+				t.Errorf("matchTopic(%q, %q) = %v, want %v", tt.pattern, tt.topic, got, tt.matches)
+			}
+		})
 	}
 }
 
-// Advanced protocol tests
-func TestProtocolAdvanced(t *testing.T) {
-	q := New()
-	mock := &mockTransport{
-		data: make([]byte, 1024*4),
+func TestSubscription(t *testing.T) {
+	transport := newMockTransport()
+	protocol := NewProtocol(transport)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	received := make(chan *Message, 1)
+	handler := MessageHandlerFunc(func(msg *Message) {
+		received <- msg
+	})
+
+	// Subscribe to temperature topics
+	protocol.Subscribe("sensor/+/temperature", handler)
+
+	// Start receiving messages
+	protocol.StartReceiving(ctx)
+
+	// Test message
+	msg := &Message{
+		Topic:   "sensor/1/temperature",
+		Payload: []byte("25.5"),
 	}
 
-	var lastTopic string
-	callbackCount := 0
-
-	callback := func(msg *Message, _ interface{}) {
-		callbackCount++
-		lastTopic = msg.Header.Topic
+	// Simulate sending message
+	if err := protocol.SendMessage(msg); err != nil {
+		t.Fatalf("SendMessage() error = %v", err)
 	}
 
-	q.SetTransport(mock.send, mock.recv, nil)
+	transport.readBuf.Write(transport.writeBuf.Bytes())
 
-	// Multiple subscriptions
-	if !q.Subscribe("sensor/+/temp", callback, nil) {
-		t.Fatal("Failed to subscribe to sensor/+/temp")
-	}
-	if !q.Subscribe("control/#", callback, nil) {
-		t.Fatal("Failed to subscribe to control/#")
-	}
-
-	// Test first message
-	mock.size = 0
-	if err := q.PublishString("sensor/1/temp", "25.5"); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Process(); err != nil {
-		t.Fatal(err)
-	}
-	if callbackCount != 1 {
-		t.Errorf("Expected callback count 1, got %d", callbackCount)
-	}
-	if lastTopic != "sensor/1/temp" {
-		t.Errorf("Expected topic sensor/1/temp, got %s", lastTopic)
-	}
-
-	// Test second message
-	mock.size = 0
-	if err := q.PublishString("control/pump/on", "1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Process(); err != nil {
-		t.Fatal(err)
-	}
-	if callbackCount != 2 {
-		t.Errorf("Expected callback count 2, got %d", callbackCount)
-	}
-	if lastTopic != "control/pump/on" {
-		t.Errorf("Expected topic control/pump/on, got %s", lastTopic)
-	}
-
-	// Test unsubscribe
-	q.Unsubscribe("sensor/+/temp")
-	mock.size = 0
-	if err := q.PublishString("sensor/1/temp", "26.5"); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Process(); err != nil {
-		t.Fatal(err)
-	}
-	if callbackCount != 2 {
-		t.Errorf("Expected callback count to remain at 2, got %d", callbackCount)
+	// Wait for message
+	select {
+	case receivedMsg := <-received:
+		if receivedMsg.Topic != msg.Topic {
+			t.Errorf("Topic mismatch: got %v, want %v", receivedMsg.Topic, msg.Topic)
+		}
+		if !bytes.Equal(receivedMsg.Payload, msg.Payload) {
+			t.Errorf("Payload mismatch: got %v, want %v", receivedMsg.Payload, msg.Payload)
+		}
+	case <-time.After(time.Second):
+		t.Error("Timeout waiting for message")
 	}
 }

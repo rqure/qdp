@@ -22,16 +22,17 @@ func main() {
 
 	dbWorker := qdb.NewDatabaseWorker(db)
 	leaderElectionWorker := qdb.NewLeaderElectionWorker(db)
-	schemaValidator := qdb.NewSchemaValidator(db)
-	// tcpListener := NewTCPListener(db)
+	tcpTransportWorker := NewTCPTransportWorker(db)
 
-	schemaValidator.AddEntity("QdpTcpTransport", "Address", "IsClient", "IsEnabled", "IsConnected")
-	schemaValidator.AddEntity("QdpDevice",
-		"QdpId",
-		"GetDevicesTrigger", "DeviceList",
-		"GetTelemetryTrigger", "TelemetryFn",
-		"CommandString", "CommandInt", "CommandFloat",
-	)
+	schemaValidator := qdb.NewSchemaValidator(db)
+
+	schemaValidator.AddEntity("QdpController") // entity type
+
+	schemaValidator.AddEntity("QdpTcpTransport", // entity type
+		"Address", "IsClient", "IsEnabled", "IsConnected") // entity fields
+
+	schemaValidator.AddEntity("QdpTopic", // entity type
+		"Topic", "TransportReference", "TxMessage", "RxMessage", "RxMessageFn") // entity fields
 
 	dbWorker.Signals.SchemaUpdated.Connect(qdb.Slot(schemaValidator.ValidationRequired))
 	dbWorker.Signals.Connected.Connect(qdb.Slot(schemaValidator.ValidationRequired))
@@ -41,10 +42,10 @@ func main() {
 
 	dbWorker.Signals.Connected.Connect(qdb.Slot(leaderElectionWorker.OnDatabaseConnected))
 	dbWorker.Signals.Disconnected.Connect(qdb.Slot(leaderElectionWorker.OnDatabaseDisconnected))
-	// dbWorker.Signals.SchemaUpdated.Connect(qdb.Slot(tcpListener.OnSchemaUpdated))
+	dbWorker.Signals.SchemaUpdated.Connect(qdb.Slot(tcpTransportWorker.OnSchemaUpdated))
 
-	// leaderElectionWorker.Signals.BecameLeader.Connect(qdb.Slot(tcpListener.OnBecameLeader))
-	// leaderElectionWorker.Signals.LosingLeadership.Connect(qdb.Slot(tcpListener.OnLostLeadership))
+	leaderElectionWorker.Signals.BecameLeader.Connect(qdb.Slot(tcpTransportWorker.OnBecameLeader))
+	leaderElectionWorker.Signals.LosingLeadership.Connect(qdb.Slot(tcpTransportWorker.OnLostLeadership))
 
 	// Create a new application configuration
 	config := qdb.ApplicationConfig{
@@ -52,7 +53,7 @@ func main() {
 		Workers: []qdb.IWorker{
 			dbWorker,
 			leaderElectionWorker,
-			// tcpListener,
+			tcpTransportWorker,
 		},
 	}
 
@@ -61,38 +62,4 @@ func main() {
 
 	// Execute the application
 	app.Execute()
-
-	// gw := NewTCPServerGateway("0.0.0.0:12346")
-	// gw.Start()
-
-	// for {
-	// 	<-time.After(1 * time.Second)
-
-	// 	m := &QDPMessage{
-	// 		Header: QDPHeader{
-	// 			From:          1,
-	// 			To:            0xDEADBEEF,
-	// 			PayloadType:   PAYLOAD_TYPE_DEVICE_ID_REQUEST,
-	// 			CorrelationId: 1,
-	// 		},
-	// 		Payload: QDPPayload{
-	// 			DataType: DATA_TYPE_NULL,
-	// 			Size:     0,
-	// 			Data:     []byte{},
-	// 		},
-	// 	}
-
-	// 	qdb.Info("Sending message: %s", m.String())
-	// 	gw.Send(m)
-
-	// 	<-time.After(1 * time.Second)
-
-	// 	for {
-	// 		m = gw.Recv()
-	// 		if m == nil {
-	// 			break
-	// 		}
-	// 		qdb.Info("Recieved: %s", m.String())
-	// 	}
-	// }
 }

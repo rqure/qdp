@@ -11,7 +11,7 @@ Each QDP message has a compact, consistent structure divided into three parts:
 ```
 
 - **HEADER:** Identifies the topic length, topic, and payload length.
-- **PAYLOAD:** Contains base64 encoded data.
+- **PAYLOAD:** Contains data, usually in string form.
 - **CHECKSUM/CRC:** Ensures data integrity.
 
 ### 1. Header
