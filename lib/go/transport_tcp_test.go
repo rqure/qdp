@@ -214,11 +214,14 @@ func TestConnectionHandlerFunc(t *testing.T) {
 			connectCount.Add(1)
 		},
 		OnDisconnectFunc: func(transport ITransport, err error) {
-			disconnectCount.Add(1)
+			// Only count disconnects from client transports
+			if _, isServer := transport.(*TCPServerTransport); !isServer {
+				disconnectCount.Add(1)
+			}
 		},
 	}
 
-	// Start server
+	// Start server with handler
 	server, err := NewTCPServerTransport("127.0.0.1:0", handler)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
@@ -231,10 +234,13 @@ func TestConnectionHandlerFunc(t *testing.T) {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 
-	// Wait for connect callback
+	// Wait for connect callbacks
 	time.Sleep(100 * time.Millisecond)
+	if got := connectCount.Load(); got != 2 {
+		t.Errorf("Expected 2 connect callbacks, got %d", got)
+	}
 
-	// Close client and wait for disconnect callback
+	// Close client and wait for disconnect callbacks
 	client.Close()
 
 	time.Sleep(100 * time.Millisecond)

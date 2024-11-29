@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 )
 
 // TCPClientTransport implements ITransport for TCP client connections
@@ -14,6 +15,7 @@ type TCPClientTransport struct {
 	connectionHandler IConnectionHandler
 	ctx               context.Context
 	cancel            context.CancelFunc
+	disconnected      atomic.Bool // Add atomic flag for disconnect state
 }
 
 // NewTCPClientTransport creates a new TCP client transport by dialing a server
@@ -59,8 +61,7 @@ func (t *TCPClientTransport) Read(p []byte) (n int, err error) {
 		return 0, io.EOF
 	default:
 		n, err = t.conn.Read(p)
-		if err != nil && t.connectionHandler != nil {
-			// Always notify on errors, including closed connections
+		if err != nil && t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
 			t.connectionHandler.OnDisconnect(t, err)
 		}
 		return n, err
@@ -79,7 +80,8 @@ func (t *TCPClientTransport) Write(p []byte) (n int, err error) {
 func (t *TCPClientTransport) Close() error {
 	t.cancel() // Cancel context first
 	err := t.conn.Close()
-	if t.connectionHandler != nil {
+	// Only call OnDisconnect if we haven't already disconnected
+	if t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
 		t.connectionHandler.OnDisconnect(t, err)
 	}
 	return err
@@ -94,6 +96,7 @@ type TCPServerTransport struct {
 	wg                sync.WaitGroup
 	clients           sync.Map
 	readChan          chan []byte
+	disconnected      atomic.Bool // Add atomic flag for server disconnect state
 }
 
 // NewTCPServerTransport creates a new TCP server transport
@@ -125,7 +128,8 @@ func NewTCPServerTransport(address string, connectionHandler IConnectionHandler)
 func (t *TCPServerTransport) acceptLoop() {
 	defer t.wg.Done()
 	defer func() {
-		if t.connectionHandler != nil {
+		// Only call OnDisconnect if we haven't already disconnected
+		if t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
 			t.connectionHandler.OnDisconnect(t, nil)
 		}
 	}()
@@ -140,7 +144,8 @@ func (t *TCPServerTransport) acceptLoop() {
 				return
 			}
 
-			client := NewTCPClientTransportFromConn(conn, t.connectionHandler)
+			// Create client with NO connection handler - server will handle notifications
+			client := NewTCPClientTransportFromConn(conn, nil)
 
 			t.clients.Store(client, struct{}{})
 
@@ -162,12 +167,7 @@ func (t *TCPServerTransport) handleClientReads(client *TCPClientTransport) {
 		default:
 			n, err := client.Read(buf)
 			if err != nil {
-				// Always remove client and notify on any error
 				t.clients.Delete(client)
-
-				if t.connectionHandler != nil {
-					t.connectionHandler.OnDisconnect(client, err)
-				}
 				return
 			}
 			if n > 0 {
@@ -227,12 +227,13 @@ func (t *TCPServerTransport) Close() error {
 	// Close all clients
 	t.clients.Range(func(key, _ interface{}) bool {
 		client := key.(*TCPClientTransport)
-		client.Close()
+		client.Close() // This will trigger the client's disconnect callback
 		return true
 	})
 
 	err := t.listener.Close()
-	if t.connectionHandler != nil {
+	// Only call OnDisconnect if we haven't already disconnected
+	if t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
 		t.connectionHandler.OnDisconnect(t, err)
 	}
 	t.wg.Wait()
