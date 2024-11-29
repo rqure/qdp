@@ -46,19 +46,32 @@ bool qdp_buffer_can_write(const qdp_buffer_t *buf, size_t bytes) {
 
 // Message operations
 bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg) {
-    // Write header and raw payload
-    size_t total_size = sizeof(qdp_header_t) + msg->payload.size;
-    if (!qdp_buffer_can_write(buf, total_size + sizeof(uint32_t))) {
+    // Calculate required size
+    size_t header_size = 8;  // Just the lengths (4 + 4)
+    size_t total_size = header_size + msg->header.topic_len + msg->payload.size + sizeof(uint32_t);
+    
+    if (!qdp_buffer_can_write(buf, total_size)) {
         return false;
     }
 
-    memcpy(buf->data + buf->size, &msg->header, sizeof(qdp_header_t));
-    buf->size += sizeof(qdp_header_t);
+    // Write topic length and payload length
+    uint32_t topic_len = msg->header.topic_len;
+    uint32_t payload_len = msg->payload.size;
+    memcpy(buf->data + buf->size, &topic_len, 4);
+    buf->size += 4;
+    memcpy(buf->data + buf->size, &payload_len, 4);
+    buf->size += 4;
 
+    // Write topic string
+    memcpy(buf->data + buf->size, msg->header.topic, msg->header.topic_len);
+    buf->size += msg->header.topic_len;
+
+    // Write payload
     memcpy(buf->data + buf->size, msg->payload.data, msg->payload.size);
     buf->size += msg->payload.size;
 
-    uint32_t crc = qdp_calc_crc32(buf->data + buf->position, buf->size - buf->position);
+    // Calculate CRC on everything before CRC position
+    uint32_t crc = qdp_calc_crc32(buf->data, buf->size);
     memcpy(buf->data + buf->size, &crc, sizeof(uint32_t));
     buf->size += sizeof(uint32_t);
 
@@ -66,41 +79,43 @@ bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg) {
 }
 
 bool qdp_message_read(qdp_buffer_t *buf, qdp_message_t *msg) {
-    if (!qdp_buffer_can_read(buf, sizeof(qdp_header_t))) {
-        return false;
-    }
-
-    // Read header
-    memcpy(&msg->header, buf->data + buf->position, sizeof(qdp_header_t));
-    buf->position += sizeof(qdp_header_t);
-
-    // Check if we can read the full message
-    if (!qdp_buffer_can_read(buf, msg->header.payload_len + sizeof(uint32_t))) {
-        return false;
-    }
-
-    // Read raw payload
-    if (msg->header.payload_len > QDP_MAX_PAYLOAD_SIZE) {
-        return false;
-    }
+    size_t start_pos = buf->position;
     
+    // Read lengths (8 bytes total)
+    if (!qdp_buffer_can_read(buf, 8)) {
+        return false;
+    }
+
+    // Read topic length and payload length
+    memcpy(&msg->header.topic_len, buf->data + buf->position, 4);
+    buf->position += 4;
+    memcpy(&msg->header.payload_len, buf->data + buf->position, 4);
+    buf->position += 4;
+
+    // Validate lengths
+    if (msg->header.topic_len > QDP_MAX_TOPIC_LENGTH ||
+        msg->header.payload_len > QDP_MAX_PAYLOAD_SIZE ||
+        !qdp_buffer_can_read(buf, msg->header.topic_len + msg->header.payload_len + sizeof(uint32_t))) {
+        return false;
+    }
+
+    // Read topic
+    memcpy(msg->header.topic, buf->data + buf->position, msg->header.topic_len);
+    msg->header.topic[msg->header.topic_len] = '\0';  // Null terminate
+    buf->position += msg->header.topic_len;
+
+    // Read payload
     memcpy(msg->payload.data, buf->data + buf->position, msg->header.payload_len);
     msg->payload.size = msg->header.payload_len;
     buf->position += msg->header.payload_len;
 
-    // Read and verify checksum
-    if (!qdp_buffer_can_read(buf, sizeof(uint32_t))) {
-        return false;
-    }
-
-    msg->checksum = *(uint32_t*)(buf->data + buf->position);
+    // Read CRC
+    memcpy(&msg->checksum, buf->data + buf->position, sizeof(uint32_t));
     buf->position += sizeof(uint32_t);
 
-    uint32_t calc_crc = qdp_calc_crc32(buf->data + buf->position - 
-                                      msg->header.payload_len - 
-                                      sizeof(qdp_header_t) - 
-                                      sizeof(uint32_t),
-                                      msg->header.payload_len + sizeof(qdp_header_t));
+    // Verify CRC
+    uint32_t calc_crc = qdp_calc_crc32(buf->data + start_pos, 
+                                      buf->position - start_pos - sizeof(uint32_t));
     
     return msg->checksum == calc_crc;
 }
