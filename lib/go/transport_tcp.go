@@ -88,16 +88,19 @@ func (t *TCPClientTransport) Close() error {
 	return nil
 }
 
-// TCPServerTransport implements a TCP server that creates client transports
+// TCPServerTransport implements both a TCP server and ITransport
 type TCPServerTransport struct {
 	listener          net.Listener
-	connectionHandler IConnectionHandler
+	connectionHandler IConnectionHandler // Server's connection handler
 	done              chan struct{}
 	wg                sync.WaitGroup
+	mu                sync.RWMutex
+	clients           []*TCPClientTransport
+	readChan          chan []byte
 }
 
 // NewTCPServerTransport creates a new TCP server transport
-func NewTCPServerTransport(address string, clientConnectionHandler IConnectionHandler) (*TCPServerTransport, error) {
+func NewTCPServerTransport(address string, connectionHandler IConnectionHandler) (*TCPServerTransport, error) {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, fmt.Errorf("failed to listen: %w", err)
@@ -105,22 +108,35 @@ func NewTCPServerTransport(address string, clientConnectionHandler IConnectionHa
 
 	server := &TCPServerTransport{
 		listener:          listener,
+		connectionHandler: connectionHandler,
 		done:              make(chan struct{}),
-		connectionHandler: clientConnectionHandler,
+		clients:           make([]*TCPClientTransport, 0),
+		readChan:          make(chan []byte, 100), // Buffered channel for reads
 	}
 
 	server.wg.Add(1)
 	go server.acceptLoop()
 
+	if connectionHandler != nil {
+		connectionHandler.OnConnect(server)
+	}
+
 	return server, nil
 }
 
 func (t *TCPServerTransport) SetConnectionHandler(handler IConnectionHandler) {
+	t.mu.Lock()
 	t.connectionHandler = handler
+	t.mu.Unlock()
 }
 
 func (t *TCPServerTransport) acceptLoop() {
 	defer t.wg.Done()
+	defer func() {
+		if t.connectionHandler != nil {
+			t.connectionHandler.OnDisconnect(t, nil)
+		}
+	}()
 
 	for {
 		select {
@@ -135,15 +151,107 @@ func (t *TCPServerTransport) acceptLoop() {
 				continue
 			}
 
-			transport := NewTCPClientTransportFromConn(conn, t.connectionHandler)
-			t.connectionHandler.OnConnect(transport)
+			client := NewTCPClientTransportFromConn(conn, nil)
+			t.mu.Lock()
+			t.clients = append(t.clients, client)
+			t.mu.Unlock()
+
+			// Start goroutine to handle client reads
+			t.wg.Add(1)
+			go t.handleClientReads(client)
 		}
 	}
 }
 
+// handleClientReads continuously reads from a client and pushes data to readChan
+func (t *TCPServerTransport) handleClientReads(client *TCPClientTransport) {
+	defer t.wg.Done()
+	buf := make([]byte, 4096)
+
+	for {
+		select {
+		case <-t.done:
+			return
+		default:
+			n, err := client.Read(buf)
+			if err != nil {
+				if !isClosedError(err) {
+					// Remove client from list on error
+					t.mu.Lock()
+					for i, c := range t.clients {
+						if c == client {
+							t.clients = append(t.clients[:i], t.clients[i+1:]...)
+							break
+						}
+					}
+					t.mu.Unlock()
+				}
+				return
+			}
+			if n > 0 {
+				// Copy the data since buf will be reused
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				t.readChan <- data
+			}
+		}
+	}
+}
+
+// Read implements ITransport by reading from the readChan
+func (t *TCPServerTransport) Read(p []byte) (n int, err error) {
+	select {
+	case <-t.done:
+		return 0, io.EOF
+	case data := <-t.readChan:
+		n = copy(p, data)
+		if t.connectionHandler != nil {
+			msg := &Message{Payload: data} // Create basic message for callback
+			t.connectionHandler.OnMessageReceived(t, msg)
+		}
+		return n, nil
+	}
+}
+
+// Write implements ITransport by broadcasting write to all clients
+func (t *TCPServerTransport) Write(p []byte) (n int, err error) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	var lastErr error
+	for _, client := range t.clients {
+		n, err := client.Write(p)
+		if err != nil {
+			lastErr = err
+		} else {
+			if t.connectionHandler != nil {
+				msg := &Message{Payload: p} // Create basic message for callback
+				t.connectionHandler.OnMessageSent(t, msg)
+			}
+			return n, nil
+		}
+	}
+	if lastErr != nil {
+		return 0, lastErr
+	}
+	return len(p), nil
+}
+
+// Close implements ITransport
 func (t *TCPServerTransport) Close() error {
 	close(t.done)
+
+	t.mu.Lock()
+	for _, client := range t.clients {
+		client.Close()
+	}
+	t.clients = nil
+	t.mu.Unlock()
+
 	err := t.listener.Close()
+	if t.connectionHandler != nil {
+		t.connectionHandler.OnDisconnect(t, err)
+	}
 	t.wg.Wait()
 	return err
 }

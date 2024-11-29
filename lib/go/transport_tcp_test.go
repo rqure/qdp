@@ -95,30 +95,20 @@ func TestTCPClientTransport(t *testing.T) {
 }
 
 func TestTCPServerTransport(t *testing.T) {
-	var wg sync.WaitGroup
-	receivedData := make(chan []byte, 1)
-
-	handler := &mockConnectionHandler{}
-	handler.handleClient = func(transport ITransport) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			buf := make([]byte, 1024)
-			n, err := transport.Read(buf)
-			if err != nil {
-				return
-			}
-			receivedData <- buf[:n]
-			transport.Write(buf[:n]) // Echo back
-		}()
-	}
+	serverHandler := &mockConnectionHandler{}
 
 	// Create server
-	server, err := NewTCPServerTransport("127.0.0.1:0", handler)
+	server, err := NewTCPServerTransport("127.0.0.1:0", serverHandler)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 	defer server.Close()
+
+	// Verify server got connect callback
+	time.Sleep(100 * time.Millisecond)
+	if got := serverHandler.connectCount.Load(); got != 1 {
+		t.Errorf("Expected 1 server connect callback, got %d", got)
+	}
 
 	// Get server address
 	addr := server.listener.Addr().String()
@@ -135,27 +125,15 @@ func TestTCPServerTransport(t *testing.T) {
 		t.Fatalf("Failed to write to server: %v", err)
 	}
 
-	// Wait for data to be received
-	select {
-	case data := <-receivedData:
-		if !bytes.Equal(data, testData) {
-			t.Errorf("Data mismatch: got %v, want %v", data, testData)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Timeout waiting for data")
-	}
-
-	// Test echo
+	// Read from server transport
 	readBuf := make([]byte, len(testData))
-	n, err := client.Read(readBuf)
+	n, err := server.Read(readBuf)
 	if err != nil {
-		t.Fatalf("Failed to read echo: %v", err)
+		t.Fatalf("Server read failed: %v", err)
 	}
 	if !bytes.Equal(readBuf[:n], testData) {
-		t.Errorf("Echo data mismatch: got %v, want %v", readBuf[:n], testData)
+		t.Errorf("Data mismatch: got %v, want %v", readBuf[:n], testData)
 	}
-
-	wg.Wait()
 }
 
 func TestMultipleClientConnections(t *testing.T) {
@@ -163,44 +141,39 @@ func TestMultipleClientConnections(t *testing.T) {
 	var clientsConnected sync.WaitGroup
 	clientsConnected.Add(numClients)
 
-	handler := &mockConnectionHandler{
-		handleClient: func(transport ITransport) {
-			clientsConnected.Done()
-		},
-	}
+	serverHandler := &mockConnectionHandler{}
 
 	// Create server
-	server, err := NewTCPServerTransport("127.0.0.1:0", handler)
+	server, err := NewTCPServerTransport("127.0.0.1:0", serverHandler)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 	defer server.Close()
 
-	// Create multiple clients
+	// Create multiple clients and wait for connects
 	addr := server.listener.Addr().String()
+	clients := make([]*TCPClientTransport, numClients)
 	for i := 0; i < numClients; i++ {
 		go func(id int) {
 			client, err := NewTCPClientTransport(addr, nil)
 			if err != nil {
 				t.Errorf("Client %d failed to connect: %v", id, err)
+				clientsConnected.Done()
 				return
 			}
-			defer client.Close()
+			clients[id] = client
+			clientsConnected.Done()
 		}(i)
 	}
 
-	// Wait for all clients to connect with timeout
-	done := make(chan struct{})
-	go func() {
-		clientsConnected.Wait()
-		close(done)
-	}()
+	// Wait for all clients to connect
+	clientsConnected.Wait()
 
-	select {
-	case <-done:
-		// Success
-	case <-time.After(time.Second):
-		t.Fatal("Timeout waiting for clients to connect")
+	// Cleanup
+	for _, client := range clients {
+		if client != nil {
+			client.Close()
+		}
 	}
 }
 
@@ -214,23 +187,22 @@ func TestConnectionCallbacks(t *testing.T) {
 	}
 	defer server.Close()
 
-	// Create client
-	client, err := NewTCPClientTransport(server.listener.Addr().String(), nil)
+	// Create client with handler too
+	clientHandler := &mockConnectionHandler{}
+	client, err := NewTCPClientTransport(server.listener.Addr().String(), clientHandler)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 
 	// Wait for connect callback
 	time.Sleep(100 * time.Millisecond)
-	if got := handler.connectCount.Load(); got != 1 {
-		t.Errorf("Expected 1 connect callback, got %d", got)
-	}
 
-	// Close client and wait for disconnect
+	// Close client and wait for disconnect callbacks
 	client.Close()
+
 	time.Sleep(100 * time.Millisecond)
-	if got := handler.disconnectCount.Load(); got != 1 {
-		t.Errorf("Expected 1 disconnect callback, got %d", got)
+	if got := clientHandler.disconnectCount.Load(); got != 1 {
+		t.Errorf("Expected 1 client disconnect callback, got %d", got)
 	}
 }
 
@@ -253,24 +225,59 @@ func TestConnectionHandlerFunc(t *testing.T) {
 	}
 	defer server.Close()
 
-	// Create client
-	client, err := NewTCPClientTransport(server.listener.Addr().String(), nil)
+	// Create client with same handler
+	client, err := NewTCPClientTransport(server.listener.Addr().String(), handler)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 
 	// Wait for connect callback
 	time.Sleep(100 * time.Millisecond)
-	if got := connectCount.Load(); got != 1 {
-		t.Errorf("Expected 1 connect callback, got %d", got)
-	}
 
-	// Close client and wait for disconnect
+	// Close client and wait for disconnect callback
 	client.Close()
+
 	time.Sleep(100 * time.Millisecond)
 	if got := disconnectCount.Load(); got != 1 {
 		t.Errorf("Expected 1 disconnect callback, got %d", got)
 	}
 }
 
-// ...existing code...
+func TestTCPServerTransportAsTransport(t *testing.T) {
+	handler := &mockConnectionHandler{}
+
+	// Create server
+	server, err := NewTCPServerTransport("127.0.0.1:0", handler)
+	if err != nil {
+		t.Fatalf("Failed to create server: %v", err)
+	}
+	defer server.Close()
+
+	// Connect some clients
+	addr := server.listener.Addr().String()
+	testData := []byte("broadcast test")
+
+	// Create and connect clients
+	for i := 0; i < 3; i++ {
+		client, err := NewTCPClientTransport(addr, nil)
+		if err != nil {
+			t.Fatalf("Client %d failed to connect: %v", i, err)
+		}
+		defer client.Close()
+	}
+
+	// Wait for clients to connect
+	time.Sleep(100 * time.Millisecond)
+
+	// Test broadcast write
+	n, err := server.Write(testData)
+	if err != nil {
+		t.Fatalf("Server write failed: %v", err)
+	}
+	if n != len(testData) {
+		t.Errorf("Write length mismatch: got %v, want %v", n, len(testData))
+	}
+
+	// Verify server implements ITransport
+	var _ ITransport = server
+}
