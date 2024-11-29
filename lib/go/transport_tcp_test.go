@@ -12,6 +12,8 @@ import (
 type mockConnectionHandler struct {
 	connectCount    atomic.Int32
 	disconnectCount atomic.Int32
+	sentCount       atomic.Int32
+	receivedCount   atomic.Int32
 	handleClient    func(ITransport)
 }
 
@@ -24,6 +26,14 @@ func (h *mockConnectionHandler) OnConnect(transport ITransport) {
 
 func (h *mockConnectionHandler) OnDisconnect(transport ITransport, err error) {
 	h.disconnectCount.Add(1)
+}
+
+func (h *mockConnectionHandler) OnMessageSent(transport ITransport, msg *Message) {
+	h.sentCount.Add(1)
+}
+
+func (h *mockConnectionHandler) OnMessageReceived(transport ITransport, msg *Message) {
+	h.receivedCount.Add(1)
 }
 
 func TestTCPClientTransport(t *testing.T) {

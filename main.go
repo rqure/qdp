@@ -29,7 +29,7 @@ func main() {
 	schemaValidator.AddEntity("QdpController") // entity type
 
 	schemaValidator.AddEntity("QdpTcpTransport", // entity type
-		"Address", "IsClient", "IsEnabled", "ActiveConnections") // entity fields
+		"Address", "IsClient", "IsEnabled", "ActiveConnections", "TotalReceived", "TotalSent") // entity fields
 
 	schemaValidator.AddEntity("QdpTopic", // entity type
 		"Topic", "TransportReference", "TxMessage", "RxMessage", "RxMessageFn") // entity fields
@@ -45,7 +45,7 @@ func main() {
 	dbWorker.Signals.SchemaUpdated.Connect(qdb.Slot(messageBroker.OnSchemaUpdated))
 
 	leaderElectionWorker.Signals.BecameLeader.Connect(qdb.Slot(messageBroker.OnBecameLeader))
-	leaderElectionWorker.Signals.LosingLeadership.Connect(qdb.Slot(messageBroker.OnLostLeadership))
+	leaderElectionWorker.Signals.LosingLeadership.Connect(qdb.Slot(messageBroker.OnLosingLeadership))
 
 	// Create a new application configuration
 	config := qdb.ApplicationConfig{

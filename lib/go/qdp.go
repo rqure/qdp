@@ -19,12 +19,16 @@ var (
 type IConnectionHandler interface {
 	OnConnect(transport ITransport)
 	OnDisconnect(transport ITransport, err error)
+	OnMessageSent(transport ITransport, msg *Message)
+	OnMessageReceived(transport ITransport, msg *Message)
 }
 
 // ConnectionHandlerFunc is a function type that implements IConnectionHandler
 type ConnectionHandlerFunc struct {
-	OnConnectFunc    func(transport ITransport)
-	OnDisconnectFunc func(transport ITransport, err error)
+	OnConnectFunc         func(transport ITransport)
+	OnDisconnectFunc      func(transport ITransport, err error)
+	OnMessageSentFunc     func(transport ITransport, msg *Message)
+	OnMessageReceivedFunc func(transport ITransport, msg *Message)
 }
 
 func (h ConnectionHandlerFunc) OnConnect(transport ITransport) {
@@ -36,6 +40,18 @@ func (h ConnectionHandlerFunc) OnConnect(transport ITransport) {
 func (h ConnectionHandlerFunc) OnDisconnect(transport ITransport, err error) {
 	if h.OnDisconnectFunc != nil {
 		h.OnDisconnectFunc(transport, err)
+	}
+}
+
+func (h ConnectionHandlerFunc) OnMessageSent(transport ITransport, msg *Message) {
+	if h.OnMessageSentFunc != nil {
+		h.OnMessageSentFunc(transport, msg)
+	}
+}
+
+func (h ConnectionHandlerFunc) OnMessageReceived(transport ITransport, msg *Message) {
+	if h.OnMessageReceivedFunc != nil {
+		h.OnMessageReceivedFunc(transport, msg)
 	}
 }
 
@@ -226,14 +242,16 @@ type IProtocol interface {
 	PublishMessage(topic string, payload []byte) error
 	StartReceiving(ctx context.Context)
 	Close() error
+	SetConnectionHandler(handler IConnectionHandler)
 }
 
 // DefaultProtocol handles reading and writing messages over a transport
 type DefaultProtocol struct {
-	transport   ITransport
-	subscribers ISubscriptionManager
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
+	transport         ITransport
+	subscribers       ISubscriptionManager
+	connectionHandler IConnectionHandler
+	cancel            context.CancelFunc
+	wg                sync.WaitGroup
 }
 
 // NewProtocol creates a new Protocol instance
@@ -253,6 +271,11 @@ func (p *DefaultProtocol) SetSubscriptionManager(manager ISubscriptionManager) {
 	p.subscribers = manager
 }
 
+// SetConnectionHandler sets the connection handler
+func (p *DefaultProtocol) SetConnectionHandler(handler IConnectionHandler) {
+	p.connectionHandler = handler
+}
+
 // SendMessage sends a message over the transport
 func (p *DefaultProtocol) SendMessage(msg *Message) error {
 	data, err := msg.Encode()
@@ -260,6 +283,9 @@ func (p *DefaultProtocol) SendMessage(msg *Message) error {
 		return err
 	}
 	_, err = p.transport.Write(data)
+	if err == nil && p.connectionHandler != nil {
+		p.connectionHandler.OnMessageSent(p.transport, msg)
+	}
 	return err
 }
 
@@ -307,6 +333,9 @@ func (p *DefaultProtocol) PublishMessage(topic string, payload []byte) error {
 
 // handleMessage routes received messages to subscribers
 func (p *DefaultProtocol) handleMessage(msg *Message) {
+	if p.connectionHandler != nil {
+		p.connectionHandler.OnMessageReceived(p.transport, msg)
+	}
 	p.subscribers.HandleMessage(msg)
 }
 
