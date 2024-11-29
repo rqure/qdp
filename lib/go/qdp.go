@@ -250,19 +250,23 @@ type DefaultProtocol struct {
 	transport         ITransport
 	subscribers       ISubscriptionManager
 	connectionHandler IConnectionHandler
+	msgCh             chan *Message
+	ctx               context.Context
 	cancel            context.CancelFunc
-	wg                sync.WaitGroup
 }
 
-// NewProtocol creates a new Protocol instance
 func NewProtocol(transport ITransport, subscribers ISubscriptionManager) IProtocol {
 	if subscribers == nil {
 		subscribers = NewSubscriptionManager()
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	return &DefaultProtocol{
 		transport:   transport,
 		subscribers: subscribers,
+		msgCh:       make(chan *Message, 100),
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
@@ -339,14 +343,13 @@ func (p *DefaultProtocol) handleMessage(msg *Message) {
 	p.subscribers.HandleMessage(msg)
 }
 
-// StartReceiving starts a goroutine to receive and handle messages
-func (p *DefaultProtocol) StartReceiving(ctx context.Context) {
-	ctx, cancel := context.WithCancel(ctx)
-	p.cancel = cancel
-	p.wg.Add(1)
+// StartReceiving starts message processing loop
+func (p *DefaultProtocol) StartReceiving(parentCtx context.Context) {
+	ctx, cancel := context.WithCancel(parentCtx)
 
+	// Start receive loop
 	go func() {
-		defer p.wg.Done()
+		defer cancel() // Cancel our local context when we're done
 		for {
 			select {
 			case <-ctx.Done():
@@ -354,20 +357,38 @@ func (p *DefaultProtocol) StartReceiving(ctx context.Context) {
 			default:
 				msg, err := p.ReceiveMessage()
 				if err != nil {
-					continue
+					select {
+					case <-ctx.Done():
+						return
+					default:
+						continue
+					}
 				}
+				select {
+				case p.msgCh <- msg:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	// Start process loop
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case msg := <-p.msgCh:
 				p.handleMessage(msg)
 			}
 		}
 	}()
 }
 
-// Close gracefully shuts down the protocol and its transport
+// Close cancels the context and closes the transport
 func (p *DefaultProtocol) Close() error {
-	if p.cancel != nil {
-		p.cancel()
-		p.wg.Wait()
-	}
+	p.cancel() // Cancel our own context first
 	return p.transport.Close()
 }
 

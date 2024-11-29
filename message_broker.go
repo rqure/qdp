@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"time"
 
 	qdb "github.com/rqure/qdb/src"
 	qdp "github.com/rqure/qdp/lib/go"
@@ -52,14 +53,14 @@ func (w *MessageBroker) setupTcpTransport(transportEntity qdb.IEntity) {
 	enabled := transportEntity.GetField("IsEnabled").PullBool()
 
 	if !enabled {
-		qdb.Info("[MessageBroker::OnBecameLeader] TCP Transport %v is disabled", transportEntity.GetId())
+		qdb.Info("[MessageBroker::setupTcpTransport] Transport %s is disabled", transportEntity.GetId())
 		return
 	}
 
 	connectionHandler := qdp.ConnectionHandlerFunc{
 		OnConnectFunc: func(transport qdp.ITransport) {
 			w.taskCh <- func() {
-				qdb.Info("[MessageBroker::OnBecameLeader] TCP Transport connected: %v", transport)
+				qdb.Info("[MessageBroker::setupTcpTransport] Transport %s connected successfully", transportEntity.GetId())
 
 				isConnected.PushBool(true)
 
@@ -72,20 +73,26 @@ func (w *MessageBroker) setupTcpTransport(transportEntity qdb.IEntity) {
 
 		OnDisconnectFunc: func(transport qdp.ITransport, err error) {
 			w.taskCh <- func() {
-				qdb.Info("[MessageBroker::OnBecameLeader] TCP Transport disconnected: %v, error: %v", transport, err)
+				if err != nil {
+					qdb.Error("[MessageBroker::setupTcpTransport] Transport %s disconnected with error: %v", transportEntity.GetId(), err)
+				} else {
+					qdb.Info("[MessageBroker::setupTcpTransport] Transport %s disconnected gracefully", transportEntity.GetId())
+				}
 
 				isConnected.PushBool(false)
 
-				protocol := w.protocolsByEntity[transportEntity.GetId()]
-				protocol.Close()
-
-				delete(w.protocolsByEntity, transportEntity.GetId())
+				// Safely handle protocol cleanup
+				if protocol, exists := w.protocolsByEntity[transportEntity.GetId()]; exists {
+					protocol.Close()
+					delete(w.protocolsByEntity, transportEntity.GetId())
+				}
 			}
 		},
 
 		OnMessageReceivedFunc: func(transport qdp.ITransport, msg *qdp.Message) {
 			w.taskCh <- func() {
-				qdb.Info("[MessageBroker::OnBecameLeader] TCP Transport message received: %v", msg)
+				qdb.Debug("[MessageBroker::setupTcpTransport] Transport %s received message on topic '%s' with %d bytes",
+					transportEntity.GetId(), msg.Topic, len(msg.Payload))
 
 				totalReceived.PushInt(totalReceived.PullInt() + 1)
 			}
@@ -93,7 +100,8 @@ func (w *MessageBroker) setupTcpTransport(transportEntity qdb.IEntity) {
 
 		OnMessageSentFunc: func(transport qdp.ITransport, msg *qdp.Message) {
 			w.taskCh <- func() {
-				qdb.Info("[MessageBroker::OnBecameLeader] TCP Transport message sent: %v", msg)
+				qdb.Debug("[MessageBroker::setupTcpTransport] Transport %s sent message on topic '%s' with %d bytes",
+					transportEntity.GetId(), msg.Topic, len(msg.Payload))
 
 				totalSent.PushInt(totalSent.PullInt() + 1)
 			}
@@ -107,16 +115,22 @@ func (w *MessageBroker) setupTcpTransport(transportEntity qdb.IEntity) {
 		_, err := qdp.NewTCPClientTransport(addr, connectionHandler)
 
 		if err != nil {
-			qdb.Error("[MessageBroker::OnBecameLeader] Failed to create TCP client transport: %v", err)
+			qdb.Error("[MessageBroker::setupTcpTransport] Failed to create client transport %s at %s: %v",
+				transportEntity.GetId(), addr, err)
 			return
 		}
+		qdb.Info("[MessageBroker::setupTcpTransport] Created client transport %s connecting to %s",
+			transportEntity.GetId(), addr)
 	} else {
 		_, err := qdp.NewTCPServerTransport(addr, connectionHandler)
 
 		if err != nil {
-			qdb.Error("[MessageBroker::OnBecameLeader] Failed to create TCP server transport: %v", err)
+			qdb.Error("[MessageBroker::setupTcpTransport] Failed to create server transport %s listening on %s: %v",
+				transportEntity.GetId(), addr, err)
 			return
 		}
+		qdb.Info("[MessageBroker::setupTcpTransport] Created server transport %s listening on %s",
+			transportEntity.GetId(), addr)
 	}
 }
 
@@ -169,16 +183,24 @@ func (w *MessageBroker) setup() {
 }
 
 func (w *MessageBroker) teardown() {
-	for _, protocol := range w.protocolsByEntity {
-		protocol.Close()
+	// Make a copy of protocol IDs to avoid map mutation during iteration
+	ids := make([]string, 0, len(w.protocolsByEntity))
+	for id := range w.protocolsByEntity {
+		ids = append(ids, id)
 	}
 
-	w.protocolsByEntity = make(map[string]qdp.IProtocol)
+	// Close each protocol
+	for _, id := range ids {
+		if protocol, exists := w.protocolsByEntity[id]; exists {
+			protocol.Close()
+			delete(w.protocolsByEntity, id)
+		}
+	}
 
+	// Clean up notification tokens
 	for _, token := range w.tokens {
 		token.Unbind()
 	}
-
 	w.tokens = make([]qdb.INotificationToken, 0)
 }
 
@@ -196,15 +218,18 @@ func (w *MessageBroker) Init() {
 }
 
 func (w *MessageBroker) Deinit() {
-	w.teardown()
-	w.cancel()
+	w.cancel() // Cancel context first
 
-	// Wait for any pending tasks
+	// Drain pending tasks with a timeout
+	timeout := time.After(5 * time.Second)
 	for {
 		select {
 		case task := <-w.taskCh:
 			task()
+		case <-timeout:
+			return
 		default:
+			w.teardown()
 			return
 		}
 	}
@@ -221,25 +246,30 @@ func (w *MessageBroker) DoWork() {
 }
 
 func (w *MessageBroker) onTcpTransportIsEnabledChanged(notification *qdb.DatabaseNotification) {
-	transportEntity := notification.Current.Id
+	transportEntity := qdb.NewEntity(w.db, notification.Current.Id)
 	isEnabled := qdb.ValueCast[*qdb.Bool](notification.Current.Value).Raw
 
 	// Get existing protocol if any
-	existingProtocol := w.protocolsByEntity[transportEntity]
+	existingProtocol := w.protocolsByEntity[transportEntity.GetId()]
 
 	// If disabled, cleanup existing protocol
 	if !isEnabled && existingProtocol != nil {
+		qdb.Info("[MessageBroker::onTcpTransportIsEnabledChanged] Disabling transport %s", transportEntity.GetId())
 		existingProtocol.Close()
-		delete(w.protocolsByEntity, transportEntity)
+		delete(w.protocolsByEntity, transportEntity.GetId())
 		return
 	}
 
 	// If already enabled with protocol, nothing to do
 	if isEnabled && existingProtocol != nil {
+		qdb.Debug("[MessageBroker::onTcpTransportIsEnabledChanged] Transport %s is already enabled", transportEntity.GetId())
 		return
 	}
 
-	w.setupTcpTransport(qdb.NewEntity(w.db, notification.Current.Id))
+	if isEnabled {
+		qdb.Info("[MessageBroker::onTcpTransportIsEnabledChanged] Enabling transport %s", transportEntity.GetId())
+		w.setupTcpTransport(transportEntity)
+	}
 }
 
 func (w *MessageBroker) onTxMessage(notification *qdb.DatabaseNotification) {
@@ -250,12 +280,19 @@ func (w *MessageBroker) onTxMessage(notification *qdb.DatabaseNotification) {
 	protocol := w.protocolsByEntity[transportEntity]
 
 	if protocol == nil {
-		qdb.Warn("[MessageBroker::onTxMessage] Protocol not found for transport entity: %v", transportEntity)
+		qdb.Error("[MessageBroker::onTxMessage] Cannot send message: transport %s not found or not connected", transportEntity)
 		return
 	}
 
-	protocol.SendMessage(&qdp.Message{
+	err := protocol.SendMessage(&qdp.Message{
 		Topic:   topic,
 		Payload: []byte(txMessage),
 	})
+	if err != nil {
+		qdb.Error("[MessageBroker::onTxMessage] Failed to send message on topic '%s' to transport %s: %v",
+			topic, transportEntity, err)
+		return
+	}
+	qdb.Debug("[MessageBroker::onTxMessage] Successfully sent message on topic '%s' to transport %s",
+		topic, transportEntity)
 }
