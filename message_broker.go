@@ -57,6 +57,26 @@ func (w *MessageBroker) setupTcpTransport(transportEntity qdb.IEntity) {
 		return
 	}
 
+	msgHandler := qdp.MessageHandlerFunc{
+		OnMessageRxFunc: func(msg *qdp.Message) {
+			w.taskCh <- func() {
+				qdb.Debug("[MessageBroker::setupTcpTransport] Transport %s received message on topic '%s' with %d bytes",
+					transportEntity.GetId(), msg.Topic, len(msg.Payload))
+
+				totalReceived.PushInt(totalReceived.PullInt() + 1)
+			}
+		},
+
+		OnMessageTxFunc: func(msg *qdp.Message) {
+			w.taskCh <- func() {
+				qdb.Debug("[MessageBroker::setupTcpTransport] Transport %s sent message on topic '%s' with %d bytes",
+					transportEntity.GetId(), msg.Topic, len(msg.Payload))
+
+				totalSent.PushInt(totalSent.PullInt() + 1)
+			}
+		},
+	}
+
 	connectionHandler := qdp.ConnectionHandlerFunc{
 		OnConnectFunc: func(transport qdp.ITransport) {
 			w.taskCh <- func() {
@@ -64,7 +84,7 @@ func (w *MessageBroker) setupTcpTransport(transportEntity qdb.IEntity) {
 
 				isConnected.PushBool(true)
 
-				protocol := qdp.NewProtocol(transport, nil)
+				protocol := qdp.NewProtocol(transport, nil, msgHandler)
 				w.protocolsByEntity[transportEntity.GetId()] = protocol
 
 				protocol.StartReceiving(w.ctx)
@@ -86,24 +106,6 @@ func (w *MessageBroker) setupTcpTransport(transportEntity qdb.IEntity) {
 					protocol.Close()
 					delete(w.protocolsByEntity, transportEntity.GetId())
 				}
-			}
-		},
-
-		OnMessageReceivedFunc: func(transport qdp.ITransport, msg *qdp.Message) {
-			w.taskCh <- func() {
-				qdb.Debug("[MessageBroker::setupTcpTransport] Transport %s received message on topic '%s' with %d bytes",
-					transportEntity.GetId(), msg.Topic, len(msg.Payload))
-
-				totalReceived.PushInt(totalReceived.PullInt() + 1)
-			}
-		},
-
-		OnMessageSentFunc: func(transport qdp.ITransport, msg *qdp.Message) {
-			w.taskCh <- func() {
-				qdb.Debug("[MessageBroker::setupTcpTransport] Transport %s sent message on topic '%s' with %d bytes",
-					transportEntity.GetId(), msg.Topic, len(msg.Payload))
-
-				totalSent.PushInt(totalSent.PullInt() + 1)
 			}
 		},
 	}
@@ -175,7 +177,7 @@ func (w *MessageBroker) setup() {
 			continue
 		}
 
-		protocol.Subscribe(topic, qdp.MessageHandlerFunc(func(m *qdp.Message) {
+		protocol.Subscribe(topic, qdp.MessageRxHandlerFunc(func(m *qdp.Message) {
 			rxMessage.PushString(string(m.Payload))
 			rxMessageFn.PushString(string(m.Payload))
 		}))

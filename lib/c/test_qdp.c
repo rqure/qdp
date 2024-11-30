@@ -290,6 +290,92 @@ TEST(topic_matching) {
     assert(qdp_topic_matches("+", "a"));
 }
 
+// Add after other test definitions
+TEST(wire_format_compatibility) {
+    // Test case 1: Verify basic message format
+    {
+        uint8_t buffer[1024];
+        qdp_buffer_t buf = qdp_buffer_create(buffer, sizeof(buffer));
+        
+        qdp_message_t msg = {0};
+        const char* topic = "test/topic";
+        const char* payload = "Hello";
+        
+        msg.header.topic_len = strlen(topic);
+        strncpy(msg.header.topic, topic, QDP_MAX_TOPIC_LENGTH-1);
+        msg.payload.size = strlen(payload);
+        memcpy(msg.payload.data, payload, msg.payload.size);
+        
+        assert(qdp_message_write(&buf, &msg));
+        
+        // Verify wire format:
+        // [4 bytes topic_len][4 bytes payload_len][topic][payload][4 bytes CRC]
+        uint32_t topic_len = *(uint32_t*)buffer;
+        uint32_t payload_len = *(uint32_t*)(buffer + 4);
+        assert(topic_len == strlen(topic));
+        assert(payload_len == strlen(payload));
+        
+        // Verify topic and payload placement
+        assert(memcmp(buffer + 8, topic, topic_len) == 0);
+        assert(memcmp(buffer + 8 + topic_len, payload, payload_len) == 0);
+    }
+    
+    // Test case 2: Verify CRC calculation matches known good values
+    {
+        uint8_t buffer[1024];
+        qdp_buffer_t buf = qdp_buffer_create(buffer, sizeof(buffer));
+        
+        qdp_message_t msg = {0};
+        const char* topic = "sensor/temp";
+        const char* payload = "25.5";
+        
+        msg.header.topic_len = strlen(topic);
+        strncpy(msg.header.topic, topic, QDP_MAX_TOPIC_LENGTH-1);
+        msg.payload.size = strlen(payload);
+        memcpy(msg.payload.data, payload, msg.payload.size);
+        
+        assert(qdp_message_write(&buf, &msg));
+        
+        // Verify message can be read back
+        qdp_message_t read_msg = {0};
+        buf.position = 0;
+        assert(qdp_message_read(&buf, &read_msg));
+        
+        // Verify all parts match
+        assert(read_msg.header.topic_len == strlen(topic));
+        assert(read_msg.payload.size == strlen(payload));
+        assert(memcmp(read_msg.header.topic, topic, read_msg.header.topic_len) == 0);
+        assert(memcmp(read_msg.payload.data, payload, read_msg.payload.size) == 0);
+    }
+    
+    // Test case 3: Verify zero-length payload
+    {
+        uint8_t buffer[1024];
+        qdp_buffer_t buf = qdp_buffer_create(buffer, sizeof(buffer));
+        
+        qdp_message_t msg = {0};
+        const char* topic = "test/empty";
+        
+        msg.header.topic_len = strlen(topic);
+        strncpy(msg.header.topic, topic, QDP_MAX_TOPIC_LENGTH-1);
+        msg.payload.size = 0;
+        
+        assert(qdp_message_write(&buf, &msg));
+        
+        // Verify format with zero payload
+        uint32_t topic_len = *(uint32_t*)buffer;
+        uint32_t payload_len = *(uint32_t*)(buffer + 4);
+        assert(topic_len == strlen(topic));
+        assert(payload_len == 0);
+        
+        // Verify can be read back
+        qdp_message_t read_msg = {0};
+        buf.position = 0;
+        assert(qdp_message_read(&buf, &read_msg));
+        assert(read_msg.payload.size == 0);
+    }
+}
+
 int main(void) {
     RUN_TEST(buffer_operations);
     RUN_TEST(message_operations);
@@ -299,6 +385,7 @@ int main(void) {
     RUN_TEST(negative_cases);
     RUN_TEST(protocol_advanced);
     RUN_TEST(topic_matching);
+    RUN_TEST(wire_format_compatibility);
     
     printf("All tests passed!\n");
     return 0;

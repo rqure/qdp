@@ -19,16 +19,12 @@ var (
 type IConnectionHandler interface {
 	OnConnect(transport ITransport)
 	OnDisconnect(transport ITransport, err error)
-	OnMessageSent(transport ITransport, msg *Message)
-	OnMessageReceived(transport ITransport, msg *Message)
 }
 
 // ConnectionHandlerFunc is a function type that implements IConnectionHandler
 type ConnectionHandlerFunc struct {
-	OnConnectFunc         func(transport ITransport)
-	OnDisconnectFunc      func(transport ITransport, err error)
-	OnMessageSentFunc     func(transport ITransport, msg *Message)
-	OnMessageReceivedFunc func(transport ITransport, msg *Message)
+	OnConnectFunc    func(transport ITransport)
+	OnDisconnectFunc func(transport ITransport, err error)
 }
 
 func (h ConnectionHandlerFunc) OnConnect(transport ITransport) {
@@ -40,18 +36,6 @@ func (h ConnectionHandlerFunc) OnConnect(transport ITransport) {
 func (h ConnectionHandlerFunc) OnDisconnect(transport ITransport, err error) {
 	if h.OnDisconnectFunc != nil {
 		h.OnDisconnectFunc(transport, err)
-	}
-}
-
-func (h ConnectionHandlerFunc) OnMessageSent(transport ITransport, msg *Message) {
-	if h.OnMessageSentFunc != nil {
-		h.OnMessageSentFunc(transport, msg)
-	}
-}
-
-func (h ConnectionHandlerFunc) OnMessageReceived(transport ITransport, msg *Message) {
-	if h.OnMessageReceivedFunc != nil {
-		h.OnMessageReceivedFunc(transport, msg)
 	}
 }
 
@@ -139,29 +123,64 @@ func Decode(data []byte) (*Message, error) {
 	}, nil
 }
 
-// IMessageHandler defines callback interface for message handlers
-type IMessageHandler interface {
-	HandleMessage(msg *Message)
+// IMessageRxHandler defines callback interface for message handlers
+type IMessageRxHandler interface {
+	OnMessageRx(msg *Message)
 }
 
-// MessageHandlerFunc is a function type that implements IMessageHandler
-type MessageHandlerFunc func(msg *Message)
+// IMessageTxHandler defines callback interface for message handlers
+type IMessageTxHandler interface {
+	OnMessageTx(msg *Message)
+}
 
-func (f MessageHandlerFunc) HandleMessage(msg *Message) {
+// IMessageHandler defines the interface for message handlers
+type IMessageHandler interface {
+	IMessageRxHandler
+	IMessageTxHandler
+}
+
+// MessageRxHandlerFunc is a function type that implements IMessageRxHandler
+type MessageRxHandlerFunc func(msg *Message)
+
+func (f MessageRxHandlerFunc) OnMessageRx(msg *Message) {
 	f(msg)
+}
+
+// MessageTxHandlerFunc is a function type that implements IMessageTxHandler
+type MessageTxHandlerFunc func(msg *Message)
+
+func (f MessageTxHandlerFunc) OnMessageTx(msg *Message) {
+	f(msg)
+}
+
+type MessageHandlerFunc struct {
+	OnMessageRxFunc func(msg *Message)
+	OnMessageTxFunc func(msg *Message)
+}
+
+func (f MessageHandlerFunc) OnMessageRx(msg *Message) {
+	if f.OnMessageRxFunc != nil {
+		f.OnMessageRxFunc(msg)
+	}
+}
+
+func (f MessageHandlerFunc) OnMessageTx(msg *Message) {
+	if f.OnMessageTxFunc != nil {
+		f.OnMessageTxFunc(msg)
+	}
 }
 
 // Subscription represents a topic subscription
 type subscription struct {
 	topic   string
-	handler IMessageHandler
+	handler IMessageRxHandler
 }
 
 // ISubscriptionManager defines the interface for managing subscriptions
 type ISubscriptionManager interface {
-	Subscribe(topic string, handler IMessageHandler)
-	Unsubscribe(topic string, handler IMessageHandler)
-	HandleMessage(msg *Message)
+	Subscribe(topic string, handler IMessageRxHandler)
+	Unsubscribe(topic string, handler IMessageRxHandler)
+	OnMessageRx(msg *Message)
 }
 
 // DefaultSubscriptionManager implements ISubscriptionManager
@@ -176,13 +195,13 @@ func NewSubscriptionManager() ISubscriptionManager {
 	}
 }
 
-func (sm *DefaultSubscriptionManager) Subscribe(topic string, handler IMessageHandler) {
+func (sm *DefaultSubscriptionManager) Subscribe(topic string, handler IMessageRxHandler) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.subscriptions = append(sm.subscriptions, subscription{topic, handler})
 }
 
-func (sm *DefaultSubscriptionManager) Unsubscribe(topic string, handler IMessageHandler) {
+func (sm *DefaultSubscriptionManager) Unsubscribe(topic string, handler IMessageRxHandler) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	for i := len(sm.subscriptions) - 1; i >= 0; i-- {
@@ -193,13 +212,13 @@ func (sm *DefaultSubscriptionManager) Unsubscribe(topic string, handler IMessage
 	}
 }
 
-func (sm *DefaultSubscriptionManager) HandleMessage(msg *Message) {
+func (sm *DefaultSubscriptionManager) OnMessageRx(msg *Message) {
 	sm.mu.RLock()
 	defer sm.mu.RUnlock()
 
 	for _, sub := range sm.subscriptions {
 		if matchTopic(sub.topic, msg.Topic) {
-			sub.handler.HandleMessage(msg)
+			sub.handler.OnMessageRx(msg)
 		}
 	}
 }
@@ -234,50 +253,43 @@ func matchTopic(pattern, topic string) bool {
 
 // IProtocol defines the interface for the QDP protocol implementation
 type IProtocol interface {
-	SetSubscriptionManager(manager ISubscriptionManager)
 	SendMessage(msg *Message) error
 	ReceiveMessage() (*Message, error)
-	Subscribe(topic string, handler IMessageHandler)
-	Unsubscribe(topic string, handler IMessageHandler)
+	Subscribe(topic string, handler IMessageRxHandler)
+	Unsubscribe(topic string, handler IMessageRxHandler)
 	PublishMessage(topic string, payload []byte) error
 	StartReceiving(ctx context.Context)
 	Close() error
-	SetConnectionHandler(handler IConnectionHandler)
 }
 
 // DefaultProtocol handles reading and writing messages over a transport
 type DefaultProtocol struct {
-	transport         ITransport
-	subscribers       ISubscriptionManager
-	connectionHandler IConnectionHandler
-	msgCh             chan *Message
-	ctx               context.Context
-	cancel            context.CancelFunc
+	transport   ITransport
+	subscribers ISubscriptionManager
+	msgCh       chan *Message
+	msgHandler  IMessageHandler
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
-func NewProtocol(transport ITransport, subscribers ISubscriptionManager) IProtocol {
+func NewProtocol(transport ITransport, subscribers ISubscriptionManager, msgHandler IMessageHandler) IProtocol {
 	if subscribers == nil {
 		subscribers = NewSubscriptionManager()
+	}
+
+	if msgHandler == nil {
+		msgHandler = &MessageHandlerFunc{}
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	return &DefaultProtocol{
 		transport:   transport,
 		subscribers: subscribers,
+		msgHandler:  msgHandler,
 		msgCh:       make(chan *Message, 100),
 		ctx:         ctx,
 		cancel:      cancel,
 	}
-}
-
-// SetSubscriptionManager sets the subscription manager
-func (p *DefaultProtocol) SetSubscriptionManager(manager ISubscriptionManager) {
-	p.subscribers = manager
-}
-
-// SetConnectionHandler sets the connection handler
-func (p *DefaultProtocol) SetConnectionHandler(handler IConnectionHandler) {
-	p.connectionHandler = handler
 }
 
 // SendMessage sends a message over the transport
@@ -286,10 +298,11 @@ func (p *DefaultProtocol) SendMessage(msg *Message) error {
 	if err != nil {
 		return err
 	}
-	_, err = p.transport.Write(data)
-	if err == nil && p.connectionHandler != nil {
-		p.connectionHandler.OnMessageSent(p.transport, msg)
+
+	if _, err := p.transport.Write(data); err == nil {
+		p.msgHandler.OnMessageTx(msg)
 	}
+
 	return err
 }
 
@@ -317,12 +330,12 @@ func (p *DefaultProtocol) ReceiveMessage() (*Message, error) {
 }
 
 // Subscribe adds a message handler for a topic pattern
-func (p *DefaultProtocol) Subscribe(topic string, handler IMessageHandler) {
+func (p *DefaultProtocol) Subscribe(topic string, handler IMessageRxHandler) {
 	p.subscribers.Subscribe(topic, handler)
 }
 
 // Unsubscribe removes a message handler for a topic pattern
-func (p *DefaultProtocol) Unsubscribe(topic string, handler IMessageHandler) {
+func (p *DefaultProtocol) Unsubscribe(topic string, handler IMessageRxHandler) {
 	p.subscribers.Unsubscribe(topic, handler)
 }
 
@@ -337,10 +350,8 @@ func (p *DefaultProtocol) PublishMessage(topic string, payload []byte) error {
 
 // handleMessage routes received messages to subscribers
 func (p *DefaultProtocol) handleMessage(msg *Message) {
-	if p.connectionHandler != nil {
-		p.connectionHandler.OnMessageReceived(p.transport, msg)
-	}
-	p.subscribers.HandleMessage(msg)
+	p.msgHandler.OnMessageRx(msg)
+	p.subscribers.OnMessageRx(msg)
 }
 
 // StartReceiving starts message processing loop

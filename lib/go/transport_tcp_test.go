@@ -28,11 +28,11 @@ func (h *mockConnectionHandler) OnDisconnect(transport ITransport, err error) {
 	h.disconnectCount.Add(1)
 }
 
-func (h *mockConnectionHandler) OnMessageSent(transport ITransport, msg *Message) {
+func (h *mockConnectionHandler) OnMessageTx(transport ITransport, msg *Message) {
 	h.sentCount.Add(1)
 }
 
-func (h *mockConnectionHandler) OnMessageReceived(transport ITransport, msg *Message) {
+func (h *mockConnectionHandler) OnMessageRx(transport ITransport, msg *Message) {
 	h.receivedCount.Add(1)
 }
 

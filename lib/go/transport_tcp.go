@@ -190,10 +190,6 @@ func (t *TCPServerTransport) Read(p []byte) (n int, err error) {
 		return 0, io.EOF
 	case data := <-t.readChan:
 		n = copy(p, data)
-		if t.connectionHandler != nil {
-			msg := &Message{Payload: data} // Create basic message for callback
-			t.connectionHandler.OnMessageReceived(t, msg)
-		}
 		return n, nil
 	}
 }
@@ -207,10 +203,6 @@ func (t *TCPServerTransport) Write(p []byte) (n int, err error) {
 		if err != nil {
 			lastErr = err
 			return true // continue iteration
-		}
-		if t.connectionHandler != nil {
-			msg := &Message{Payload: p} // Create basic message for callback
-			t.connectionHandler.OnMessageSent(t, msg)
 		}
 		return false // stop iteration on success
 	})

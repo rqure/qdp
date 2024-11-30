@@ -21,6 +21,21 @@ static uint32_t qdp_calc_crc32(const uint8_t *data, size_t length) {
     return crc ^ 0xFFFFFFFF;
 }
 
+// Add these helper functions for endian-safe operations
+static void write_uint32_le(uint8_t* buf, uint32_t value) {
+    buf[0] = (uint8_t)(value & 0xFF);
+    buf[1] = (uint8_t)((value >> 8) & 0xFF);
+    buf[2] = (uint8_t)((value >> 16) & 0xFF);
+    buf[3] = (uint8_t)((value >> 24) & 0xFF);
+}
+
+static uint32_t read_uint32_le(const uint8_t* buf) {
+    return ((uint32_t)buf[0]) |
+           ((uint32_t)buf[1] << 8) |
+           ((uint32_t)buf[2] << 16) |
+           ((uint32_t)buf[3] << 24);
+}
+
 // Buffer operations
 qdp_buffer_t qdp_buffer_create(uint8_t *data, size_t capacity) {
     return (qdp_buffer_t){
@@ -54,12 +69,10 @@ bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg) {
         return false;
     }
 
-    // Write topic length and payload length
-    uint32_t topic_len = msg->header.topic_len;
-    uint32_t payload_len = msg->payload.size;
-    memcpy(buf->data + buf->size, &topic_len, 4);
+    // Write lengths in little-endian
+    write_uint32_le(buf->data + buf->size, msg->header.topic_len);
     buf->size += 4;
-    memcpy(buf->data + buf->size, &payload_len, 4);
+    write_uint32_le(buf->data + buf->size, msg->payload.size);
     buf->size += 4;
 
     // Write topic string
@@ -72,7 +85,7 @@ bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg) {
 
     // Calculate CRC on everything before CRC position
     uint32_t crc = qdp_calc_crc32(buf->data, buf->size);
-    memcpy(buf->data + buf->size, &crc, sizeof(uint32_t));
+    write_uint32_le(buf->data + buf->size, crc);
     buf->size += sizeof(uint32_t);
 
     return true;
@@ -86,10 +99,10 @@ bool qdp_message_read(qdp_buffer_t *buf, qdp_message_t *msg) {
         return false;
     }
 
-    // Read topic length and payload length
-    memcpy(&msg->header.topic_len, buf->data + buf->position, 4);
+    // Read lengths in little-endian
+    msg->header.topic_len = read_uint32_le(buf->data + buf->position);
     buf->position += 4;
-    memcpy(&msg->header.payload_len, buf->data + buf->position, 4);
+    msg->header.payload_len = read_uint32_le(buf->data + buf->position);
     buf->position += 4;
 
     // Validate lengths
@@ -109,8 +122,8 @@ bool qdp_message_read(qdp_buffer_t *buf, qdp_message_t *msg) {
     msg->payload.size = msg->header.payload_len;
     buf->position += msg->header.payload_len;
 
-    // Read CRC
-    memcpy(&msg->checksum, buf->data + buf->position, sizeof(uint32_t));
+    // Read CRC in little-endian
+    msg->checksum = read_uint32_le(buf->data + buf->position);
     buf->position += sizeof(uint32_t);
 
     // Verify CRC

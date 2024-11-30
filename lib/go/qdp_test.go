@@ -86,7 +86,7 @@ func TestMessageEncodeDecode(t *testing.T) {
 
 func TestProtocolSendReceive(t *testing.T) {
 	transport := newMockTransport()
-	protocol := NewProtocol(transport, nil)
+	protocol := NewProtocol(transport, nil, nil)
 
 	// Test message
 	msg := &Message{
@@ -143,12 +143,12 @@ func TestTopicMatching(t *testing.T) {
 
 func TestSubscription(t *testing.T) {
 	transport := newMockTransport()
-	protocol := NewProtocol(transport, nil)
+	protocol := NewProtocol(transport, nil, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	received := make(chan *Message, 1)
-	handler := MessageHandlerFunc(func(msg *Message) {
+	handler := MessageRxHandlerFunc(func(msg *Message) {
 		received <- msg
 	})
 
@@ -189,13 +189,13 @@ func TestSharedSubscriptionManager(t *testing.T) {
 	sharedManager := NewSubscriptionManager()
 
 	transport1 := newMockTransport()
-	protocol1 := NewProtocol(transport1, sharedManager)
+	protocol1 := NewProtocol(transport1, sharedManager, nil)
 
 	transport2 := newMockTransport()
-	protocol2 := NewProtocol(transport2, sharedManager)
+	protocol2 := NewProtocol(transport2, sharedManager, nil)
 
 	received := make(chan *Message, 2)
-	handler := MessageHandlerFunc(func(msg *Message) {
+	handler := MessageRxHandlerFunc(func(msg *Message) {
 		received <- msg
 	})
 
@@ -232,7 +232,7 @@ func TestSharedSubscriptionManager(t *testing.T) {
 
 func TestProtocolGracefulClose(t *testing.T) {
 	transport := newMockTransport()
-	protocol := NewProtocol(transport, nil)
+	protocol := NewProtocol(transport, nil, nil)
 
 	ctx := context.Background()
 	protocol.StartReceiving(ctx)
@@ -255,62 +255,5 @@ func TestProtocolGracefulClose(t *testing.T) {
 		// Success - close completed
 	case <-time.After(time.Second):
 		t.Error("Close() timed out")
-	}
-}
-
-func TestMessageCallbacks(t *testing.T) {
-	transport := newMockTransport()
-
-	sentMessages := make(chan *Message, 1)
-	receivedMessages := make(chan *Message, 1)
-
-	handler := ConnectionHandlerFunc{
-		OnMessageSentFunc: func(_ ITransport, msg *Message) {
-			sentMessages <- msg
-		},
-		OnMessageReceivedFunc: func(_ ITransport, msg *Message) {
-			receivedMessages <- msg
-		},
-	}
-
-	protocol := NewProtocol(transport, nil)
-	protocol.SetConnectionHandler(handler)
-
-	// Test message
-	msg := &Message{
-		Topic:   "test",
-		Payload: []byte("hello"),
-	}
-
-	// Send message
-	if err := protocol.SendMessage(msg); err != nil {
-		t.Fatalf("SendMessage() error = %v", err)
-	}
-
-	// Verify sent callback
-	select {
-	case sentMsg := <-sentMessages:
-		if sentMsg.Topic != msg.Topic {
-			t.Errorf("Sent message topic mismatch: got %v, want %v", sentMsg.Topic, msg.Topic)
-		}
-	case <-time.After(time.Second):
-		t.Error("Timeout waiting for sent message callback")
-	}
-
-	// Simulate message receive
-	transport.readBuf.Write(transport.writeBuf.Bytes())
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	protocol.StartReceiving(ctx)
-
-	// Verify received callback
-	select {
-	case recvMsg := <-receivedMessages:
-		if recvMsg.Topic != msg.Topic {
-			t.Errorf("Received message topic mismatch: got %v, want %v", recvMsg.Topic, msg.Topic)
-		}
-	case <-time.After(time.Second):
-		t.Error("Timeout waiting for received message callback")
 	}
 }
