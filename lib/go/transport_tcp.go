@@ -2,6 +2,7 @@ package qdp
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -51,29 +52,25 @@ func NewTCPClientTransportFromConn(conn net.Conn, connectionHandler IConnectionH
 	}
 }
 
-func (t *TCPClientTransport) SetConnectionHandler(handler IConnectionHandler) {
-	t.connectionHandler = handler
-}
-
-func (t *TCPClientTransport) Read(p []byte) (n int, err error) {
+func (t *TCPClientTransport) ReadMessage() (*Message, error) {
 	select {
 	case <-t.ctx.Done():
-		return 0, io.EOF
+		return nil, io.EOF
 	default:
-		n, err = t.conn.Read(p)
+		msg, err := readMessage(t.conn)
 		if err != nil && t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
 			t.connectionHandler.OnDisconnect(t, err)
 		}
-		return n, err
+		return msg, err
 	}
 }
 
-func (t *TCPClientTransport) Write(p []byte) (n int, err error) {
+func (t *TCPClientTransport) WriteMessage(msg *Message) error {
 	select {
 	case <-t.ctx.Done():
-		return 0, io.EOF
+		return io.EOF
 	default:
-		return t.conn.Write(p)
+		return writeMessage(t.conn, msg)
 	}
 }
 
@@ -94,9 +91,9 @@ type TCPServerTransport struct {
 	ctx               context.Context
 	cancel            context.CancelFunc
 	wg                sync.WaitGroup
-	clients           sync.Map
-	readChan          chan []byte
+	clients           sync.Map    // Map of connected clients
 	disconnected      atomic.Bool // Add atomic flag for server disconnect state
+	msgCh             chan *Message
 }
 
 // NewTCPServerTransport creates a new TCP server transport
@@ -112,7 +109,7 @@ func NewTCPServerTransport(address string, connectionHandler IConnectionHandler)
 		connectionHandler: connectionHandler,
 		ctx:               ctx,
 		cancel:            cancel,
-		readChan:          make(chan []byte, 100), // Buffered channel for reads
+		msgCh:             make(chan *Message, 100), // Buffered channel for messages
 	}
 
 	server.wg.Add(1)
@@ -155,61 +152,48 @@ func (t *TCPServerTransport) acceptLoop() {
 	}
 }
 
-// handleClientReads continuously reads from a client and pushes data to readChan
 func (t *TCPServerTransport) handleClientReads(client *TCPClientTransport) {
 	defer t.wg.Done()
-	buf := make([]byte, 4096)
 
 	for {
 		select {
 		case <-t.ctx.Done():
 			return
 		default:
-			n, err := client.Read(buf)
+			msg, err := client.ReadMessage()
 			if err != nil {
 				t.clients.Delete(client)
 				return
 			}
-			if n > 0 {
-				data := make([]byte, n)
-				copy(data, buf[:n])
-				select {
-				case t.readChan <- data:
-				case <-t.ctx.Done():
-					return
-				}
+			select {
+			case t.msgCh <- msg:
+			case <-t.ctx.Done():
+				return
 			}
 		}
 	}
 }
 
-// Read implements ITransport by reading from the readChan
-func (t *TCPServerTransport) Read(p []byte) (n int, err error) {
+func (t *TCPServerTransport) ReadMessage() (*Message, error) {
 	select {
 	case <-t.ctx.Done():
-		return 0, io.EOF
-	case data := <-t.readChan:
-		n = copy(p, data)
-		return n, nil
+		return nil, io.EOF
+	case msg := <-t.msgCh:
+		return msg, nil
 	}
 }
 
-// Write implements ITransport by broadcasting write to all clients
-func (t *TCPServerTransport) Write(p []byte) (n int, err error) {
+func (t *TCPServerTransport) WriteMessage(msg *Message) error {
 	var lastErr error
 	t.clients.Range(func(key, _ interface{}) bool {
 		client := key.(*TCPClientTransport)
-		n, err = client.Write(p)
-		if err != nil {
+		if err := client.WriteMessage(msg); err != nil {
 			lastErr = err
-			return true // continue iteration
+			return true
 		}
-		return false // stop iteration on success
+		return false
 	})
-	if lastErr != nil {
-		return 0, lastErr
-	}
-	return len(p), nil
+	return lastErr
 }
 
 // Close implements ITransport
@@ -230,4 +214,56 @@ func (t *TCPServerTransport) Close() error {
 	}
 	t.wg.Wait()
 	return err
+}
+
+// Helper functions for message encoding/decoding
+func readMessage(r io.Reader) (*Message, error) {
+	// Read header (8 bytes: topic length + payload length)
+	header := make([]byte, 8)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return nil, err
+	}
+
+	topicLen := binary.LittleEndian.Uint32(header[0:4])
+	payloadLen := binary.LittleEndian.Uint32(header[4:8])
+
+	// Read topic
+	topic := make([]byte, topicLen)
+	if _, err := io.ReadFull(r, topic); err != nil {
+		return nil, err
+	}
+
+	// Read payload
+	payload := make([]byte, payloadLen)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		return nil, err
+	}
+
+	return &Message{
+		Topic:   string(topic),
+		Payload: payload,
+	}, nil
+}
+
+func writeMessage(w io.Writer, msg *Message) error {
+	// Write header (topic length + payload length)
+	header := make([]byte, 8)
+	binary.LittleEndian.PutUint32(header[0:4], uint32(len(msg.Topic)))
+	binary.LittleEndian.PutUint32(header[4:8], uint32(len(msg.Payload)))
+
+	if _, err := w.Write(header); err != nil {
+		return err
+	}
+
+	// Write topic
+	if _, err := w.Write([]byte(msg.Topic)); err != nil {
+		return err
+	}
+
+	// Write payload
+	if _, err := w.Write(msg.Payload); err != nil {
+		return err
+	}
+
+	return nil
 }

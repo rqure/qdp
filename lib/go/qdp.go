@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"io"
 	"strings"
 	"sync"
 )
@@ -41,8 +40,8 @@ func (h ConnectionHandlerFunc) OnDisconnect(transport ITransport, err error) {
 
 // ITransport defines the interface for different transport mechanisms
 type ITransport interface {
-	Read(p []byte) (n int, err error)
-	Write(p []byte) (n int, err error)
+	ReadMessage() (*Message, error)
+	WriteMessage(*Message) error
 	Close() error
 }
 
@@ -294,12 +293,9 @@ func NewProtocol(transport ITransport, subscribers ISubscriptionManager, msgHand
 
 // SendMessage sends a message over the transport
 func (p *DefaultProtocol) SendMessage(msg *Message) error {
-	data, err := msg.Encode()
-	if err != nil {
-		return err
-	}
+	err := p.transport.WriteMessage(msg)
 
-	if _, err := p.transport.Write(data); err == nil {
+	if err == nil {
 		p.msgHandler.OnMessageTx(msg)
 	}
 
@@ -308,25 +304,7 @@ func (p *DefaultProtocol) SendMessage(msg *Message) error {
 
 // ReceiveMessage reads a message from the transport
 func (p *DefaultProtocol) ReceiveMessage() (*Message, error) {
-	// Read header first to determine message size
-	header := make([]byte, 8)
-	if _, err := io.ReadFull(p.transport, header); err != nil {
-		return nil, err
-	}
-
-	topicLen := binary.LittleEndian.Uint32(header[0:4])
-	payloadLen := binary.LittleEndian.Uint32(header[4:8])
-
-	// Read the rest of the message
-	remainingLen := topicLen + payloadLen + 4 // +4 for CRC
-	data := make([]byte, 8+remainingLen)
-	copy(data, header)
-
-	if _, err := io.ReadFull(p.transport, data[8:]); err != nil {
-		return nil, err
-	}
-
-	return Decode(data)
+	return p.transport.ReadMessage()
 }
 
 // Subscribe adds a message handler for a topic pattern
@@ -360,7 +338,7 @@ func (p *DefaultProtocol) StartReceiving(parentCtx context.Context) {
 
 	// Start receive loop
 	go func() {
-		defer cancel() // Cancel our local context when we're done
+		defer cancel()
 		for {
 			select {
 			case <-ctx.Done():
