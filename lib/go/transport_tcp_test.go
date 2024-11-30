@@ -8,16 +8,16 @@ import (
 	"time"
 )
 
-type mockConnectionHandler struct {
+type mockTcpConnectionHandler struct {
 	connectCount    atomic.Int32
 	disconnectCount atomic.Int32
 }
 
-func (h *mockConnectionHandler) OnConnect(transport ITransport) {
+func (h *mockTcpConnectionHandler) OnConnect(transport ITransport) {
 	h.connectCount.Add(1)
 }
 
-func (h *mockConnectionHandler) OnDisconnect(transport ITransport, err error) {
+func (h *mockTcpConnectionHandler) OnDisconnect(transport ITransport, err error) {
 	h.disconnectCount.Add(1)
 }
 
@@ -81,7 +81,7 @@ func TestTCPClientTransport(t *testing.T) {
 }
 
 func TestTCPServerTransport(t *testing.T) {
-	serverHandler := &mockConnectionHandler{}
+	serverHandler := &mockTcpConnectionHandler{}
 
 	// Create server
 	server, err := NewTCPServerTransport("127.0.0.1:0", serverHandler)
@@ -134,7 +134,7 @@ func TestMultipleClientConnections(t *testing.T) {
 	var clientsConnected sync.WaitGroup
 	clientsConnected.Add(numClients)
 
-	serverHandler := &mockConnectionHandler{}
+	serverHandler := &mockTcpConnectionHandler{}
 
 	// Create server
 	server, err := NewTCPServerTransport("127.0.0.1:0", serverHandler)
@@ -171,7 +171,7 @@ func TestMultipleClientConnections(t *testing.T) {
 }
 
 func TestConnectionCallbacks(t *testing.T) {
-	handler := &mockConnectionHandler{}
+	handler := &mockTcpConnectionHandler{}
 
 	// Start server
 	server, err := NewTCPServerTransport("127.0.0.1:0", handler)
@@ -181,7 +181,7 @@ func TestConnectionCallbacks(t *testing.T) {
 	defer server.Close()
 
 	// Create client with handler too
-	clientHandler := &mockConnectionHandler{}
+	clientHandler := &mockTcpConnectionHandler{}
 	client, err := NewTCPClientTransport(server.listener.Addr().String(), clientHandler)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)

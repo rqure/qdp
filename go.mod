@@ -2,7 +2,10 @@ module github.com/rqure/qdp
 
 go 1.22.7
 
-require github.com/rqure/qdb v1.2.86
+require (
+	github.com/google/gousb v1.1.3
+	github.com/rqure/qdb v1.2.86
+)
 
 require (
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

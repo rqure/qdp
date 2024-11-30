@@ -157,6 +157,112 @@ func (w *MessageBroker) setupTcpTransport(transportEntity qdb.IEntity) {
 	}
 }
 
+func (w *MessageBroker) setupFtdiTransport(transportEntity qdb.IEntity) {
+	isConnected := transportEntity.GetField("IsConnected")
+	isConnected.PushBool(false)
+
+	totalReceived := transportEntity.GetField("TotalReceived")
+	totalSent := transportEntity.GetField("TotalSent")
+
+	enabled := transportEntity.GetField("IsEnabled").PullBool()
+
+	if !enabled {
+		qdb.Info("[MessageBroker::setupFtdiTransport] Transport %s is disabled", transportEntity.GetId())
+		return
+	}
+
+	msgHandler := qdp.MessageHandlerFunc{
+		OnMessageRxFunc: func(msg *qdp.Message) {
+			w.taskCh <- func() {
+				qdb.Debug("[MessageBroker::setupFtdiTransport] Transport %s received message on topic '%s' with %d bytes",
+					transportEntity.GetId(), msg.Topic, len(msg.Payload))
+				totalReceived.PushInt(totalReceived.PullInt() + 1)
+			}
+		},
+		OnMessageTxFunc: func(msg *qdp.Message) {
+			w.taskCh <- func() {
+				qdb.Debug("[MessageBroker::setupFtdiTransport] Transport %s sent message on topic '%s' with %d bytes",
+					transportEntity.GetId(), msg.Topic, len(msg.Payload))
+				totalSent.PushInt(totalSent.PullInt() + 1)
+			}
+		},
+	}
+
+	connectionHandler := qdp.ConnectionHandlerFunc{
+		OnConnectFunc: func(transport qdp.ITransport) {
+			w.taskCh <- func() {
+				qdb.Info("[MessageBroker::setupFtdiTransport] Transport %s connected successfully", transportEntity.GetId())
+				isConnected.PushBool(true)
+
+				protocol := qdp.NewProtocol(transport, nil, msgHandler)
+				w.protocolsByEntity[transportEntity.GetId()] = protocol
+				protocol.StartReceiving(w.ctx)
+
+				// Subscribe to topics
+				topics := qdb.NewEntityFinder(w.db).Find(qdb.SearchCriteria{
+					EntityType: "QdpTopic",
+				})
+
+				for _, topicEntity := range topics {
+					topic := topicEntity.GetField("Topic").PullString()
+					transportReference := topicEntity.GetField("TransportReference").PullEntityReference()
+					if transportReference != transportEntity.GetId() {
+						continue
+					}
+
+					rxMessage := topicEntity.GetField("RxMessage")
+					rxMessageFn := topicEntity.GetField("RxMessageFn")
+
+					protocol.Subscribe(topic, qdp.MessageRxHandlerFunc(func(m *qdp.Message) {
+						rxMessage.PushString(string(m.Payload))
+						rxMessageFn.PushString(string(m.Payload))
+					}))
+				}
+			}
+		},
+		OnDisconnectFunc: func(transport qdp.ITransport, err error) {
+			w.taskCh <- func() {
+				if err != nil {
+					qdb.Error("[MessageBroker::setupFtdiTransport] Transport %s disconnected with error: %v", transportEntity.GetId(), err)
+				} else {
+					qdb.Info("[MessageBroker::setupFtdiTransport] Transport %s disconnected gracefully", transportEntity.GetId())
+				}
+				isConnected.PushBool(false)
+
+				if protocol, exists := w.protocolsByEntity[transportEntity.GetId()]; exists {
+					protocol.Close()
+					delete(w.protocolsByEntity, transportEntity.GetId())
+				}
+			}
+		},
+	}
+
+	// Get FTDI configuration
+	vid := uint16(transportEntity.GetField("VendorID").PullInt())
+	pid := uint16(transportEntity.GetField("ProductID").PullInt())
+	iface := transportEntity.GetField("Interface").PullInt()
+	readEp := transportEntity.GetField("ReadEndpoint").PullInt()
+	writeEp := transportEntity.GetField("WriteEndpoint").PullInt()
+
+	config := qdp.FTDIConfig{
+		VID:       vid,
+		PID:       pid,
+		Interface: int(iface),
+		ReadEP:    int(readEp),
+		WriteEP:   int(writeEp),
+	}
+
+	_, err := qdp.NewFTDITransport(config, connectionHandler)
+	if err != nil {
+		qdb.Error("[MessageBroker::setupFtdiTransport] Failed to create FTDI transport %s: %v",
+			transportEntity.GetId(), err)
+		return
+	}
+
+	qdb.Info("[MessageBroker::setupFtdiTransport] Created FTDI transport %s with VID:PID %04x:%04x",
+		transportEntity.GetId(), vid, pid)
+}
+
 func (w *MessageBroker) setup() {
 	w.tokens = append(w.tokens, w.db.Notify(&qdb.DatabaseNotificationConfig{
 		Type:  "QdpTcpTransport",
@@ -178,6 +284,14 @@ func (w *MessageBroker) setup() {
 
 	for _, transportEntity := range tcpTransports {
 		w.setupTcpTransport(transportEntity)
+	}
+
+	// Setup FTDI transports
+	ftdiTransports := qdb.NewEntityFinder(w.db).Find(qdb.SearchCriteria{
+		EntityType: "QdpFtdiTransport",
+	})
+	for _, transportEntity := range ftdiTransports {
+		w.setupFtdiTransport(transportEntity)
 	}
 }
 
