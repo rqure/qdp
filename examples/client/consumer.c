@@ -14,7 +14,15 @@ static void signal_handler(int sig) {
 
 static void message_handler(const qdp_message_t* msg, void* ctx) {
     (void)ctx;
-    printf("%s: %s\n", qdp_get_topic(msg), qdp_get_string(msg));
+    size_t len;
+    const char* payload = qdp_get_string(msg);
+    const void* bytes = qdp_get_bytes(msg, &len);
+    printf("Received message:\n");
+    printf("  Topic: %s\n", qdp_get_topic(msg));
+    printf("  Payload length: %zu\n", len);
+    if (payload) {
+        printf("  Content: %s\n", payload);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -49,11 +57,13 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
+    printf("Connecting to %s:%d...\n", host, port);
     if (connect(tcp_ctx.sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
         perror("Connection failed");
         close(tcp_ctx.sock);
         return 1;
     }
+    printf("Connected successfully\n");
 
     // Setup QDP
     qdp_t* qdp = qdp_new();
@@ -64,7 +74,13 @@ int main(int argc, char *argv[]) {
     }
 
     qdp_set_transport(qdp, tcp_send, tcp_recv, &tcp_ctx);
-    qdp_subscribe(qdp, argv[2], message_handler, NULL);
+    if (!qdp_subscribe(qdp, argv[2], message_handler, NULL)) {
+        fprintf(stderr, "Failed to subscribe to topic: %s\n", argv[2]);
+        qdp_free(qdp);
+        close(tcp_ctx.sock);
+        return 1;
+    }
+    printf("Subscribed to topic: %s\n", argv[2]);
 
     // Setup signal handler for graceful shutdown
     signal(SIGINT, signal_handler);
@@ -73,11 +89,20 @@ int main(int argc, char *argv[]) {
     printf("Listening for messages on '%s'...\n", argv[2]);
 
     // Message loop
+    int idle_count = 0;
     while (running) {
-        if (qdp_process(qdp) < 0) {
-            fprintf(stderr, "Connection lost\n");
+        int result = qdp_process(qdp);
+        if (result < 0) {
+            fprintf(stderr, "Error processing messages: %d\n", result);
             break;
         }
+        
+        idle_count++;
+        if (idle_count >= 1000) {  // Print status every ~1 second
+            printf("Waiting for messages...\n");
+            idle_count = 0;
+        }
+        
         usleep(1000); // Small sleep to prevent CPU spinning
     }
 

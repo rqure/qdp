@@ -1,5 +1,11 @@
 #include "qdp.h"
 
+#ifdef QDP_DEBUG
+#define QDP_DEBUG_PRINT(...) fprintf(stderr, __VA_ARGS__)
+#else
+#define QDP_DEBUG_PRINT(...) ((void)0)
+#endif
+
 // CRC table and initialization
 static uint32_t qdp_crc32_table[256];
 
@@ -65,9 +71,17 @@ bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg) {
     size_t header_size = 8;  // Just the lengths (4 + 4)
     size_t total_size = header_size + msg->header.topic_len + msg->payload.size + sizeof(uint32_t);
     
+    QDP_DEBUG_PRINT("[QDP-WRITE] Writing message:\n");
+    QDP_DEBUG_PRINT("  Topic: %s (len=%u)\n", msg->header.topic, msg->header.topic_len);
+    QDP_DEBUG_PRINT("  Payload size: %u\n", msg->payload.size);
+    QDP_DEBUG_PRINT("  Total size: %zu\n", total_size);
+    
     if (!qdp_buffer_can_write(buf, total_size)) {
+        QDP_DEBUG_PRINT("[QDP-WRITE] Buffer too small (capacity=%zu)\n", buf->capacity);
         return false;
     }
+
+    size_t start_pos = buf->size;
 
     // Write lengths in little-endian
     write_uint32_le(buf->data + buf->size, msg->header.topic_len);
@@ -88,14 +102,28 @@ bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg) {
     write_uint32_le(buf->data + buf->size, crc);
     buf->size += sizeof(uint32_t);
 
+    QDP_DEBUG_PRINT("[QDP-WRITE] Message written successfully (%zu bytes)\n", buf->size - start_pos);
+    QDP_DEBUG_PRINT("[QDP-WRITE] CRC: %u\n", crc);
+    
     return true;
 }
 
 bool qdp_message_read(qdp_buffer_t *buf, qdp_message_t *msg) {
     size_t start_pos = buf->position;
     
+    QDP_DEBUG_PRINT("[QDP-READ] Attempting to read message at position %zu of %zu bytes\n", 
+            buf->position, buf->size);
+
+    // Dump first 16 bytes of buffer for debugging
+    QDP_DEBUG_PRINT("[QDP-READ] Buffer head: ");
+    for(size_t i = 0; i < 16 && (buf->position + i) < buf->size; i++) {
+        QDP_DEBUG_PRINT("%02X ", buf->data[buf->position + i]);
+    }
+    QDP_DEBUG_PRINT("\n");
+
     // Read lengths (8 bytes total)
     if (!qdp_buffer_can_read(buf, 8)) {
+        QDP_DEBUG_PRINT("[QDP-READ] Buffer too small for message header\n");
         return false;
     }
 
@@ -105,10 +133,24 @@ bool qdp_message_read(qdp_buffer_t *buf, qdp_message_t *msg) {
     msg->header.payload_len = read_uint32_le(buf->data + buf->position);
     buf->position += 4;
 
+    QDP_DEBUG_PRINT("[QDP-READ] Header read:\n");
+    QDP_DEBUG_PRINT("  Topic length: %u\n", msg->header.topic_len);
+    QDP_DEBUG_PRINT("  Payload length: %u\n", msg->header.payload_len);
+
     // Validate lengths
     if (msg->header.topic_len > QDP_MAX_TOPIC_LENGTH ||
-        msg->header.payload_len > QDP_MAX_PAYLOAD_SIZE ||
-        !qdp_buffer_can_read(buf, msg->header.topic_len + msg->header.payload_len + sizeof(uint32_t))) {
+        msg->header.payload_len > QDP_MAX_PAYLOAD_SIZE) {
+        QDP_DEBUG_PRINT("[QDP-READ] Message exceeds max sizes (topic: %u/%u, payload: %u/%u)\n",
+                msg->header.topic_len, QDP_MAX_TOPIC_LENGTH,
+                msg->header.payload_len, QDP_MAX_PAYLOAD_SIZE);
+        return false;
+    }
+
+    // Calculate remaining bytes from the original buffer size, not current position
+    size_t total_message_size = 8 + msg->header.topic_len + msg->header.payload_len + sizeof(uint32_t);
+    if (buf->size < total_message_size) {
+        QDP_DEBUG_PRINT("[QDP-READ] Incomplete message (have %zu bytes, need %zu)\n",
+                buf->size, total_message_size);
         return false;
     }
 
@@ -130,7 +172,12 @@ bool qdp_message_read(qdp_buffer_t *buf, qdp_message_t *msg) {
     uint32_t calc_crc = qdp_calc_crc32(buf->data + start_pos, 
                                       buf->position - start_pos - sizeof(uint32_t));
     
-    return msg->checksum == calc_crc;
+    if (msg->checksum != calc_crc) {
+        QDP_DEBUG_PRINT("[QDP] CRC mismatch - expected: %u, got: %u\n", msg->checksum, calc_crc);
+        return false;
+    }
+
+    return true;
 }
 
 // Modified publish operations
@@ -251,24 +298,47 @@ int qdp_publish_bytes(qdp_t* qdp, const char* topic, const void* data, size_t le
 }
 
 int qdp_process(qdp_t* qdp) {
-    if (!qdp->transport.recv) return 0;
+    if (!qdp->transport.recv) {
+        QDP_DEBUG_PRINT("[QDP] No receive handler registered\n");
+        return 0;
+    }
 
     // Reset stream for new messages
     qdp_stream_begin_message(&qdp->rx);
 
     // Get new messages from transport
     int err = qdp->transport.recv(&qdp->rx.buffer, qdp->transport.ctx);
-    if (err != 0) return err;
+    if (err != 0) {
+        QDP_DEBUG_PRINT("[QDP] Transport receive error: %d\n", err);
+        return err;
+    }
+
+    if (qdp->rx.buffer.size == 0) {
+        return 0;  // No data received
+    }
+    
+    QDP_DEBUG_PRINT("[QDP] Received %zu bytes\n", qdp->rx.buffer.size);
 
     // Process messages using stream API
     qdp_message_t msg = {0};
     while (qdp_stream_next_message(&qdp->rx, &msg)) {
+        QDP_DEBUG_PRINT("[QDP] Processing message: topic='%s' payload_len=%u\n", 
+                msg.header.topic, msg.header.payload_len);
+                
         // Match against subscriptions
+        bool matched = false;
         for (uint32_t i = 0; i < qdp->sub_count; i++) {
             if (qdp_topic_matches(qdp->subs[i].topic, msg.header.topic)) {
+                QDP_DEBUG_PRINT("[QDP] Message matched subscription '%s'\n", qdp->subs[i].topic);
                 qdp->subs[i].callback.fn(&msg, qdp->subs[i].callback.ctx);
+                matched = true;
             }
         }
+        
+        if (!matched) {
+            QDP_DEBUG_PRINT("[QDP] No matching subscriptions for topic '%s'\n", msg.header.topic);
+        }
+        
         qdp_message_clear(&msg);
     }
 
