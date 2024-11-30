@@ -184,16 +184,21 @@ func (t *TCPServerTransport) ReadMessage() (*Message, error) {
 }
 
 func (t *TCPServerTransport) WriteMessage(msg *Message) error {
-	var lastErr error
+	var errors []error
 	t.clients.Range(func(key, _ interface{}) bool {
 		client := key.(*TCPClientTransport)
 		if err := client.WriteMessage(msg); err != nil {
-			lastErr = err
-			return true
+			errors = append(errors, err)
+			// Remove failed client
+			t.clients.Delete(client)
+			client.Close()
 		}
-		return false
+		return true // continue iteration
 	})
-	return lastErr
+	if len(errors) > 0 {
+		return fmt.Errorf("broadcast errors: %v", errors)
+	}
+	return nil
 }
 
 // Close implements ITransport

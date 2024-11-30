@@ -1,7 +1,6 @@
 package qdp
 
 import (
-	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -244,125 +243,63 @@ func TestConnectionHandlerFunc(t *testing.T) {
 }
 
 func TestTCPServerTransportBroadcast(t *testing.T) {
-	handler := &mockConnectionHandler{}
-
 	// Create server
-	server, err := NewTCPServerTransport("127.0.0.1:0", handler)
+	server, err := NewTCPServerTransport("127.0.0.1:0", nil)
 	if err != nil {
 		t.Fatalf("Failed to create server: %v", err)
 	}
 	defer server.Close()
 
 	addr := server.listener.Addr().String()
+	const numClients = 3
+
+	// Create and store clients
+	clients := make([]*TCPClientTransport, numClients)
+	for i := 0; i < numClients; i++ {
+		client, err := NewTCPClientTransport(addr, nil)
+		if err != nil {
+			t.Fatalf("Failed to create client %d: %v", i, err)
+		}
+		defer client.Close()
+		clients[i] = client
+	}
+
+	// Give server time to register clients
+	time.Sleep(100 * time.Millisecond)
+
+	// Prepare test message
 	testMsg := &Message{
 		Topic:   "broadcast/test",
 		Payload: []byte("broadcast test"),
 	}
 
-	// Create multiple clients with synchronized setup
-	const numClients = 3
-	var connectWg sync.WaitGroup
-	var readWg sync.WaitGroup
-	var clients []*TCPClientTransport
-	var clientErrors []error
-	var mu sync.Mutex // protect clients and errors
+	// Start client reading goroutines
+	var wg sync.WaitGroup
+	wg.Add(numClients)
 
-	// Setup connection synchronization
-	connectWg.Add(numClients)
-	readWg.Add(numClients)
-
-	// Setup all clients first
-	for i := 0; i < numClients; i++ {
-		go func(id int) {
-			client, err := NewTCPClientTransport(addr, nil)
+	for i, client := range clients {
+		go func(id int, c *TCPClientTransport) {
+			defer wg.Done()
+			msg, err := c.ReadMessage()
 			if err != nil {
-				mu.Lock()
-				clientErrors = append(clientErrors, fmt.Errorf("client %d connect error: %v", id, err))
-				mu.Unlock()
-				connectWg.Done()
-				readWg.Done()
+				t.Errorf("Client %d failed to read: %v", id, err)
 				return
 			}
-
-			mu.Lock()
-			clients = append(clients, client)
-			mu.Unlock()
-			connectWg.Done()
-
-			// Start reading in blocking mode
-			msg, err := client.ReadMessage()
-			if err != nil {
-				mu.Lock()
-				clientErrors = append(clientErrors, fmt.Errorf("client %d read error: %v", id, err))
-				mu.Unlock()
-				readWg.Done()
-				return
-			}
-
 			if msg.Topic != testMsg.Topic {
-				mu.Lock()
-				clientErrors = append(clientErrors, fmt.Errorf("client %d topic mismatch: got %v, want %v",
-					id, msg.Topic, testMsg.Topic))
-				mu.Unlock()
+				t.Errorf("Client %d topic mismatch: got %v, want %v", id, msg.Topic, testMsg.Topic)
 			}
 			if string(msg.Payload) != string(testMsg.Payload) {
-				mu.Lock()
-				clientErrors = append(clientErrors, fmt.Errorf("client %d payload mismatch: got %v, want %v",
-					id, string(msg.Payload), string(testMsg.Payload)))
-				mu.Unlock()
+				t.Errorf("Client %d payload mismatch: got %v, want %v", id, string(msg.Payload), string(testMsg.Payload))
 			}
-			readWg.Done()
-		}(i)
+		}(i, client)
 	}
-
-	// Wait for all clients to connect with timeout
-	if !waitWithTimeout(&connectWg, 5*time.Second) {
-		t.Fatal("Timeout waiting for clients to connect")
-	}
-
-	// Check for connection errors
-	mu.Lock()
-	if len(clientErrors) > 0 {
-		for _, err := range clientErrors {
-			t.Error(err)
-		}
-		mu.Unlock()
-		t.FailNow()
-	}
-	mu.Unlock()
-
-	// Ensure server has registered all clients
-	time.Sleep(100 * time.Millisecond)
 
 	// Broadcast message
 	if err := server.WriteMessage(testMsg); err != nil {
-		t.Fatalf("Server WriteMessage failed: %v", err)
+		t.Fatalf("Failed to broadcast message: %v", err)
 	}
 
-	// Wait for all reads with timeout
-	if !waitWithTimeout(&readWg, 5*time.Second) {
-		t.Fatal("Timeout waiting for clients to receive message")
-	}
-
-	// Check for read errors
-	mu.Lock()
-	if len(clientErrors) > 0 {
-		for _, err := range clientErrors {
-			t.Error(err)
-		}
-		mu.Unlock()
-		t.FailNow()
-	}
-	mu.Unlock()
-
-	// Cleanup
-	for _, client := range clients {
-		client.Close()
-	}
-}
-
-// Helper function for WaitGroup timeout
-func waitWithTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+	// Wait for all clients with timeout
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -371,8 +308,8 @@ func waitWithTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
 
 	select {
 	case <-done:
-		return true
-	case <-time.After(timeout):
-		return false
+		// Success
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for clients to receive message")
 	}
 }
