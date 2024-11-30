@@ -31,6 +31,10 @@ func main() {
 	schemaValidator.AddEntity("QdpTcpTransport", // entity type
 		"Address", "IsClient", "IsEnabled", "IsConnected", "TotalReceived", "TotalSent") // entity fields
 
+	schemaValidator.AddEntity("QdpFtdiTransport", // entity type
+		"VendorID", "ProductID", "Interface", "ReadEndpoint", "WriteEndpoint",
+		"IsEnabled", "IsConnected", "TotalReceived", "TotalSent") // entity fields
+
 	schemaValidator.AddEntity("QdpTopic", // entity type
 		"Topic", "TransportReference", "TxMessage", "RxMessage", "RxMessageFn") // entity fields
 
