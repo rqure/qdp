@@ -81,8 +81,6 @@ bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg) {
         return false;
     }
 
-    size_t start_pos = buf->size;
-
     // Write lengths in little-endian
     write_uint32_le(buf->data + buf->size, msg->header.topic_len);
     buf->size += 4;
