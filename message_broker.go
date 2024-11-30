@@ -88,6 +88,27 @@ func (w *MessageBroker) setupTcpTransport(transportEntity qdb.IEntity) {
 				w.protocolsByEntity[transportEntity.GetId()] = protocol
 
 				protocol.StartReceiving(w.ctx)
+
+				topics := qdb.NewEntityFinder(w.db).Find(qdb.SearchCriteria{
+					EntityType: "QdpTopic",
+				})
+
+				for _, topicEntity := range topics {
+					topic := topicEntity.GetField("Topic").PullString()
+
+					transportReference := topicEntity.GetField("TransportReference").PullEntityReference()
+					if transportReference != transportEntity.GetId() {
+						continue
+					}
+
+					rxMessage := topicEntity.GetField("RxMessage")
+					rxMessageFn := topicEntity.GetField("RxMessageFn")
+
+					protocol.Subscribe(topic, qdp.MessageRxHandlerFunc(func(m *qdp.Message) {
+						rxMessage.PushString(string(m.Payload))
+						rxMessageFn.PushString(string(m.Payload))
+					}))
+				}
 			}
 		},
 
@@ -157,30 +178,6 @@ func (w *MessageBroker) setup() {
 
 	for _, transportEntity := range tcpTransports {
 		w.setupTcpTransport(transportEntity)
-	}
-
-	topics := qdb.NewEntityFinder(w.db).Find(qdb.SearchCriteria{
-		EntityType: "QdpTopic",
-	})
-
-	for _, topicEntity := range topics {
-		topic := topicEntity.GetField("Topic").PullString()
-
-		transportReference := topicEntity.GetField("TransportReference").PullEntityReference()
-
-		rxMessage := topicEntity.GetField("RxMessage")
-		rxMessageFn := topicEntity.GetField("RxMessageFn")
-
-		protocol := w.protocolsByEntity[transportReference]
-
-		if protocol == nil {
-			continue
-		}
-
-		protocol.Subscribe(topic, qdp.MessageRxHandlerFunc(func(m *qdp.Message) {
-			rxMessage.PushString(string(m.Payload))
-			rxMessageFn.PushString(string(m.Payload))
-		}))
 	}
 }
 

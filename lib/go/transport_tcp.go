@@ -165,6 +165,25 @@ func (t *TCPServerTransport) handleClientReads(client *TCPClientTransport) {
 				t.clients.Delete(client)
 				return
 			}
+
+			// broadcast to other clients
+			var errors []error
+			t.clients.Range(func(key, _ interface{}) bool {
+				client2 := key.(*TCPClientTransport)
+				if client2 == client {
+					return true // continue iteration
+				}
+
+				if err := client2.WriteMessage(msg); err != nil {
+					errors = append(errors, err)
+					// Remove failed client
+					t.clients.Delete(client2)
+					client2.Close()
+				}
+
+				return true // continue iteration
+			})
+
 			select {
 			case t.msgCh <- msg:
 			case <-t.ctx.Done():
