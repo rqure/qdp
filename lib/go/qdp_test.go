@@ -10,20 +10,34 @@ import (
 
 // mockTransport implements ITransport for testing
 type mockTransport struct {
-	readBuf  *bytes.Buffer
-	writeBuf *bytes.Buffer
+	readCh  chan *Message
+	writeCh chan *Message
 }
 
 func newMockTransport() *mockTransport {
 	return &mockTransport{
-		readBuf:  bytes.NewBuffer(nil),
-		writeBuf: bytes.NewBuffer(nil),
+		readCh:  make(chan *Message, 10),
+		writeCh: make(chan *Message, 10),
 	}
 }
 
-func (m *mockTransport) Read(p []byte) (n int, err error)  { return m.readBuf.Read(p) }
-func (m *mockTransport) Write(p []byte) (n int, err error) { return m.writeBuf.Write(p) }
-func (m *mockTransport) Close() error                      { return nil }
+func (m *mockTransport) ReadMessage() (*Message, error) {
+	msg := <-m.readCh
+	return msg, nil
+}
+
+func (m *mockTransport) WriteMessage(msg *Message) error {
+	m.writeCh <- msg
+	// Simulate echo back for testing
+	m.readCh <- msg
+	return nil
+}
+
+func (m *mockTransport) Close() error {
+	close(m.readCh)
+	close(m.writeCh)
+	return nil
+}
 
 func TestMessageEncodeDecode(t *testing.T) {
 	tests := []struct {
@@ -99,9 +113,6 @@ func TestProtocolSendReceive(t *testing.T) {
 		t.Fatalf("SendMessage() error = %v", err)
 	}
 
-	// Copy written data to read buffer for simulation
-	transport.readBuf.Write(transport.writeBuf.Bytes())
-
 	// Receive message
 	received, err := protocol.ReceiveMessage()
 	if err != nil {
@@ -169,7 +180,7 @@ func TestSubscription(t *testing.T) {
 		t.Fatalf("SendMessage() error = %v", err)
 	}
 
-	transport.readBuf.Write(transport.writeBuf.Bytes())
+	transport.readCh <- msg
 
 	// Wait for message
 	select {
@@ -212,7 +223,7 @@ func TestSharedSubscriptionManager(t *testing.T) {
 		t.Fatalf("SendMessage() error = %v", err)
 	}
 
-	transport2.readBuf.Write(transport2.writeBuf.Bytes())
+	transport2.readCh <- msg
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

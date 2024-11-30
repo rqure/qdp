@@ -1,7 +1,7 @@
 package qdp
 
 import (
-	"bytes"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -12,28 +12,14 @@ import (
 type mockConnectionHandler struct {
 	connectCount    atomic.Int32
 	disconnectCount atomic.Int32
-	sentCount       atomic.Int32
-	receivedCount   atomic.Int32
-	handleClient    func(ITransport)
 }
 
 func (h *mockConnectionHandler) OnConnect(transport ITransport) {
 	h.connectCount.Add(1)
-	if h.handleClient != nil {
-		h.handleClient(transport)
-	}
 }
 
 func (h *mockConnectionHandler) OnDisconnect(transport ITransport, err error) {
 	h.disconnectCount.Add(1)
-}
-
-func (h *mockConnectionHandler) OnMessageTx(transport ITransport, msg *Message) {
-	h.sentCount.Add(1)
-}
-
-func (h *mockConnectionHandler) OnMessageRx(transport ITransport, msg *Message) {
-	h.receivedCount.Add(1)
 }
 
 func TestTCPClientTransport(t *testing.T) {
@@ -53,12 +39,12 @@ func TestTCPClientTransport(t *testing.T) {
 		}
 		defer conn.Close()
 
-		buf := make([]byte, 1024)
-		n, err := conn.Read(buf)
+		// Read message and echo back
+		msg, err := readMessage(conn)
 		if err != nil {
 			return
 		}
-		conn.Write(buf[:n]) // Echo back
+		writeMessage(conn, msg)
 	}()
 
 	// Create client transport
@@ -68,29 +54,30 @@ func TestTCPClientTransport(t *testing.T) {
 	}
 	defer client.Close()
 
-	// Test data
-	testData := []byte("Hello, TCP!")
+	// Test message
+	testMsg := &Message{
+		Topic:   "test/topic",
+		Payload: []byte("Hello, TCP!"),
+	}
 
 	// Write test
-	n, err := client.Write(testData)
+	err = client.WriteMessage(testMsg)
 	if err != nil {
-		t.Fatalf("Write failed: %v", err)
-	}
-	if n != len(testData) {
-		t.Errorf("Write length mismatch: got %v, want %v", n, len(testData))
+		t.Fatalf("WriteMessage failed: %v", err)
 	}
 
 	// Read test
-	readBuf := make([]byte, len(testData))
-	n, err = client.Read(readBuf)
+	readMsg, err := client.ReadMessage()
 	if err != nil {
-		t.Fatalf("Read failed: %v", err)
+		t.Fatalf("ReadMessage failed: %v", err)
 	}
-	if n != len(testData) {
-		t.Errorf("Read length mismatch: got %v, want %v", n, len(testData))
+
+	// Compare messages
+	if readMsg.Topic != testMsg.Topic {
+		t.Errorf("Topic mismatch: got %v, want %v", readMsg.Topic, testMsg.Topic)
 	}
-	if !bytes.Equal(readBuf, testData) {
-		t.Errorf("Data mismatch: got %v, want %v", readBuf, testData)
+	if string(readMsg.Payload) != string(testMsg.Payload) {
+		t.Errorf("Payload mismatch: got %v, want %v", string(readMsg.Payload), string(testMsg.Payload))
 	}
 }
 
@@ -113,26 +100,33 @@ func TestTCPServerTransport(t *testing.T) {
 	// Get server address
 	addr := server.listener.Addr().String()
 
-	// Create client and send data
+	// Create client and send message
 	client, err := NewTCPClientTransport(addr, nil)
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 	defer client.Close()
 
-	testData := []byte("Hello, Server!")
-	if _, err := client.Write(testData); err != nil {
-		t.Fatalf("Failed to write to server: %v", err)
+	testMsg := &Message{
+		Topic:   "test/topic",
+		Payload: []byte("Hello, Server!"),
+	}
+
+	if err := client.WriteMessage(testMsg); err != nil {
+		t.Fatalf("Failed to write message to server: %v", err)
 	}
 
 	// Read from server transport
-	readBuf := make([]byte, len(testData))
-	n, err := server.Read(readBuf)
+	readMsg, err := server.ReadMessage()
 	if err != nil {
-		t.Fatalf("Server read failed: %v", err)
+		t.Fatalf("Server ReadMessage failed: %v", err)
 	}
-	if !bytes.Equal(readBuf[:n], testData) {
-		t.Errorf("Data mismatch: got %v, want %v", readBuf[:n], testData)
+
+	if readMsg.Topic != testMsg.Topic {
+		t.Errorf("Topic mismatch: got %v, want %v", readMsg.Topic, testMsg.Topic)
+	}
+	if string(readMsg.Payload) != string(testMsg.Payload) {
+		t.Errorf("Payload mismatch: got %v, want %v", string(readMsg.Payload), string(testMsg.Payload))
 	}
 }
 
@@ -249,7 +243,7 @@ func TestConnectionHandlerFunc(t *testing.T) {
 	}
 }
 
-func TestTCPServerTransportAsTransport(t *testing.T) {
+func TestTCPServerTransportBroadcast(t *testing.T) {
 	handler := &mockConnectionHandler{}
 
 	// Create server
@@ -259,31 +253,126 @@ func TestTCPServerTransportAsTransport(t *testing.T) {
 	}
 	defer server.Close()
 
-	// Connect some clients
 	addr := server.listener.Addr().String()
-	testData := []byte("broadcast test")
-
-	// Create and connect clients
-	for i := 0; i < 3; i++ {
-		client, err := NewTCPClientTransport(addr, nil)
-		if err != nil {
-			t.Fatalf("Client %d failed to connect: %v", i, err)
-		}
-		defer client.Close()
+	testMsg := &Message{
+		Topic:   "broadcast/test",
+		Payload: []byte("broadcast test"),
 	}
 
-	// Wait for clients to connect
+	// Create multiple clients with synchronized setup
+	const numClients = 3
+	var connectWg sync.WaitGroup
+	var readWg sync.WaitGroup
+	var clients []*TCPClientTransport
+	var clientErrors []error
+	var mu sync.Mutex // protect clients and errors
+
+	// Setup connection synchronization
+	connectWg.Add(numClients)
+	readWg.Add(numClients)
+
+	// Setup all clients first
+	for i := 0; i < numClients; i++ {
+		go func(id int) {
+			client, err := NewTCPClientTransport(addr, nil)
+			if err != nil {
+				mu.Lock()
+				clientErrors = append(clientErrors, fmt.Errorf("client %d connect error: %v", id, err))
+				mu.Unlock()
+				connectWg.Done()
+				readWg.Done()
+				return
+			}
+
+			mu.Lock()
+			clients = append(clients, client)
+			mu.Unlock()
+			connectWg.Done()
+
+			// Start reading in blocking mode
+			msg, err := client.ReadMessage()
+			if err != nil {
+				mu.Lock()
+				clientErrors = append(clientErrors, fmt.Errorf("client %d read error: %v", id, err))
+				mu.Unlock()
+				readWg.Done()
+				return
+			}
+
+			if msg.Topic != testMsg.Topic {
+				mu.Lock()
+				clientErrors = append(clientErrors, fmt.Errorf("client %d topic mismatch: got %v, want %v",
+					id, msg.Topic, testMsg.Topic))
+				mu.Unlock()
+			}
+			if string(msg.Payload) != string(testMsg.Payload) {
+				mu.Lock()
+				clientErrors = append(clientErrors, fmt.Errorf("client %d payload mismatch: got %v, want %v",
+					id, string(msg.Payload), string(testMsg.Payload)))
+				mu.Unlock()
+			}
+			readWg.Done()
+		}(i)
+	}
+
+	// Wait for all clients to connect with timeout
+	if !waitWithTimeout(&connectWg, 5*time.Second) {
+		t.Fatal("Timeout waiting for clients to connect")
+	}
+
+	// Check for connection errors
+	mu.Lock()
+	if len(clientErrors) > 0 {
+		for _, err := range clientErrors {
+			t.Error(err)
+		}
+		mu.Unlock()
+		t.FailNow()
+	}
+	mu.Unlock()
+
+	// Ensure server has registered all clients
 	time.Sleep(100 * time.Millisecond)
 
-	// Test broadcast write
-	n, err := server.Write(testData)
-	if err != nil {
-		t.Fatalf("Server write failed: %v", err)
-	}
-	if n != len(testData) {
-		t.Errorf("Write length mismatch: got %v, want %v", n, len(testData))
+	// Broadcast message
+	if err := server.WriteMessage(testMsg); err != nil {
+		t.Fatalf("Server WriteMessage failed: %v", err)
 	}
 
-	// Verify server implements ITransport
-	var _ ITransport = server
+	// Wait for all reads with timeout
+	if !waitWithTimeout(&readWg, 5*time.Second) {
+		t.Fatal("Timeout waiting for clients to receive message")
+	}
+
+	// Check for read errors
+	mu.Lock()
+	if len(clientErrors) > 0 {
+		for _, err := range clientErrors {
+			t.Error(err)
+		}
+		mu.Unlock()
+		t.FailNow()
+	}
+	mu.Unlock()
+
+	// Cleanup
+	for _, client := range clients {
+		client.Close()
+	}
+}
+
+// Helper function for WaitGroup timeout
+func waitWithTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
