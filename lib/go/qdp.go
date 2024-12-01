@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Common errors
@@ -350,6 +351,7 @@ func (p *DefaultProtocol) StartReceiving(parentCtx context.Context) {
 					case <-ctx.Done():
 						return
 					default:
+						time.Sleep(100 * time.Millisecond)
 						continue
 					}
 				}
