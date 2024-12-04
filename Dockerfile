@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y libusb-1.0-0-dev
 
 COPY go.mod go.sum ./
 RUN go mod download
+RUN go get github.com/rqure/qdp/lib/go
 
 COPY *.go ./
 
