@@ -3,6 +3,8 @@ FROM golang:1.22 AS build-stage
 
 WORKDIR /app
 
+RUN apt-get update && apt-get install -y libusb-1.0-0-dev
+
 COPY go.mod go.sum ./
 RUN go mod download
 
@@ -16,6 +18,8 @@ FROM gcr.io/distroless/base-debian11 AS build-release-stage
 WORKDIR /
 
 COPY --from=build-stage /qapp /qapp
+
+RUN apt-get update && apt-get install -y libusb-1.0-0 libusb-1.0-0-dev
 
 USER nonroot:nonroot
 
