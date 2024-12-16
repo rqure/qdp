@@ -3,67 +3,52 @@ package main
 import (
 	"os"
 
-	qdb "github.com/rqure/qdb/src"
+	"github.com/rqure/qlib/pkg/app"
+	"github.com/rqure/qlib/pkg/app/workers"
+	"github.com/rqure/qlib/pkg/data/store"
 )
 
 func getDatabaseAddress() string {
-	addr := os.Getenv("QDB_ADDR")
+	addr := os.Getenv("Q_ADDR")
 	if addr == "" {
-		addr = "redis:6379"
+		addr = "ws://webgateway:20000/ws"
 	}
 
 	return addr
 }
 
 func main() {
-	db := qdb.NewRedisDatabase(qdb.RedisDatabaseConfig{
+	s := store.NewWeb(store.WebConfig{
 		Address: getDatabaseAddress(),
 	})
 
-	dbWorker := qdb.NewDatabaseWorker(db)
-	leaderElectionWorker := qdb.NewLeaderElectionWorker(db)
-	messageBroker := NewMessageBroker(db)
+	storeWorker := workers.NewStore(s)
+	leadershipWorker := workers.NewLeadership(s)
+	messageBroker := NewMessageBroker(s)
 
-	schemaValidator := qdb.NewSchemaValidator(db)
+	schemaValidator := leadershipWorker.GetEntityFieldValidator()
 
-	schemaValidator.AddEntity("QdpController") // entity type
+	schemaValidator.RegisterEntityFields("QdpController") // entity type
 
-	schemaValidator.AddEntity("QdpTcpTransport", // entity type
+	schemaValidator.RegisterEntityFields("QdpTcpTransport", // entity type
 		"Address", "IsClient", "IsEnabled", "IsConnected", "TotalReceived", "TotalSent") // entity fields
 
-	schemaValidator.AddEntity("QdpFtdiTransport", // entity type
+	schemaValidator.RegisterEntityFields("QdpFtdiTransport", // entity type
 		"VendorID", "ProductID", "Interface", "ReadEndpoint", "WriteEndpoint",
 		"IsEnabled", "IsConnected", "TotalReceived", "TotalSent") // entity fields
 
-	schemaValidator.AddEntity("QdpTopic", // entity type
+	schemaValidator.RegisterEntityFields("QdpTopic", // entity type
 		"Topic", "TransportReference", "TxMessage", "RxMessage", "RxMessageFn") // entity fields
 
-	dbWorker.Signals.SchemaUpdated.Connect(qdb.Slot(schemaValidator.ValidationRequired))
-	dbWorker.Signals.Connected.Connect(qdb.Slot(schemaValidator.ValidationRequired))
-	leaderElectionWorker.AddAvailabilityCriteria(func() bool {
-		return dbWorker.IsConnected() && schemaValidator.IsValid()
-	})
+	storeWorker.Connected.Connect(leadershipWorker.OnStoreConnected)
+	storeWorker.Disconnected.Connect(leadershipWorker.OnStoreDisconnected)
 
-	dbWorker.Signals.Connected.Connect(qdb.Slot(leaderElectionWorker.OnDatabaseConnected))
-	dbWorker.Signals.Disconnected.Connect(qdb.Slot(leaderElectionWorker.OnDatabaseDisconnected))
-	dbWorker.Signals.SchemaUpdated.Connect(qdb.Slot(messageBroker.OnSchemaUpdated))
+	leadershipWorker.BecameLeader().Connect(messageBroker.OnBecameLeader)
+	leadershipWorker.LosingLeadership().Connect(messageBroker.OnLosingLeadership)
 
-	leaderElectionWorker.Signals.BecameLeader.Connect(qdb.Slot(messageBroker.OnBecameLeader))
-	leaderElectionWorker.Signals.LosingLeadership.Connect(qdb.Slot(messageBroker.OnLosingLeadership))
-
-	// Create a new application configuration
-	config := qdb.ApplicationConfig{
-		Name: "qdp",
-		Workers: []qdb.IWorker{
-			dbWorker,
-			leaderElectionWorker,
-			messageBroker,
-		},
-	}
-
-	// Create a new application
-	app := qdb.NewApplication(config)
-
-	// Execute the application
+	app := app.NewApplication("qdp")
+	app.AddWorker(storeWorker)
+	app.AddWorker(leadershipWorker)
+	app.AddWorker(messageBroker)
 	app.Execute()
 }
