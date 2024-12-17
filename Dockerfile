@@ -3,7 +3,7 @@ FROM golang:1.22-alpine AS build-stage
 
 WORKDIR /app
 
-RUN apk add --no-cache libusb-dev
+RUN apk add --no-cache libusb-dev build-base
 
 COPY go.mod go.sum ./
 
