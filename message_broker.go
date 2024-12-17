@@ -293,8 +293,6 @@ func (w *MessageBroker) setup(ctx context.Context) {
 			SetFieldName("SchemaUpdateTrigger"),
 		notification.NewCallback(w.OnSchemaUpdated)))
 
-	w.OnSchemaUpdated(ctx, nil)
-
 	w.tokens = append(w.tokens, w.store.Notify(
 		ctx,
 		notification.NewConfig().
