@@ -6,10 +6,11 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y libusb-1.0-0-dev
 
 COPY go.mod go.sum ./
-RUN go mod download
-RUN go get github.com/rqure/qdp/lib/go
 
+COPY lib/go ./lib/go
 COPY *.go ./
+
+RUN go mod tidy
 
 RUN CGO_ENABLED=0 GOOS=linux go build -o /qapp
 
