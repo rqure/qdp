@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rqure/qlib/pkg/log"
 )
 
 // Common errors
@@ -417,51 +418,114 @@ const (
 	maxMessageSize = 1024
 )
 
-func readMessage(r io.Reader) (*Message, error) {
-	// Read header (8 bytes: topic length + payload length)
-	header := make([]byte, 8)
-	if _, err := io.ReadFull(r, header); err != nil {
-		return nil, fmt.Errorf("failed to read header: %w", err)
+// MessageReader handles buffered reading of QDP messages
+type MessageReader struct {
+	reader io.Reader
+	buffer []byte
+	pos    int
+	count  int
+}
+
+// NewMessageReader creates a new buffered message reader
+func NewMessageReader(reader io.Reader) *MessageReader {
+	return &MessageReader{
+		reader: reader,
+		buffer: make([]byte, 2048), // Large enough for max message + potential garbage
+	}
+}
+
+func (r *MessageReader) readMore() error {
+	// If there's unprocessed data, move it to start of buffer
+	if r.pos < r.count {
+		copy(r.buffer, r.buffer[r.pos:r.count])
+		r.count -= r.pos
+		r.pos = 0
+	} else {
+		r.count = 0
+		r.pos = 0
 	}
 
-	topicLen := binary.LittleEndian.Uint32(header[0:4])
-	payloadLen := binary.LittleEndian.Uint32(header[4:8])
-
-	// Validate sizes before proceeding
-	if topicLen == 0 || topicLen > maxTopicSize {
-		return nil, fmt.Errorf("invalid topic length: %d", topicLen)
+	// Read more data
+	n, err := r.reader.Read(r.buffer[r.count:])
+	if n > 0 {
+		log.Debug("Received %d bytes: % x", n, r.buffer[r.count:r.count+n])
 	}
+	r.count += n
+	return err
+}
 
-	// Calculate total message size including header and CRC
-	totalSize := 8 + topicLen + payloadLen + 4 // header + topic + payload + CRC
+func (r *MessageReader) ReadMessage() (*Message, error) {
+	for {
+		// Ensure we have enough data for header
+		for r.count-r.pos < 8 {
+			if err := r.readMore(); err != nil {
+				return nil, err
+			}
+		}
 
-	if totalSize > maxMessageSize {
-		return nil, fmt.Errorf("message too large: %d bytes (max %d)", totalSize, maxMessageSize)
+		// Look for potential message start by checking reasonable topic length
+		for r.pos <= r.count-8 {
+			topicLen := binary.LittleEndian.Uint32(r.buffer[r.pos:])
+			payloadLen := binary.LittleEndian.Uint32(r.buffer[r.pos+4:])
+
+			// Validate sizes
+			if topicLen > 0 && topicLen <= maxTopicSize &&
+				payloadLen <= maxMessageSize-8-topicLen-4 {
+
+				totalLen := 8 + topicLen + payloadLen + 4 // header + topic + payload + CRC
+
+				// If we have enough data, try to parse message
+				if r.count-r.pos >= int(totalLen) {
+					msg, err := r.tryParseMessage(int(totalLen))
+					if err == nil {
+						return msg, nil
+					}
+					// On parse error, advance one byte and continue scanning
+					r.pos++
+					continue
+				}
+
+				// Need more data
+				if err := r.readMore(); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			// Invalid sizes, advance and keep scanning
+			r.pos++
+		}
 	}
+}
 
-	// Read the rest of the message
-	msgData := make([]byte, totalSize)
-	copy(msgData[0:8], header)
-
-	if _, err := io.ReadFull(r, msgData[8:]); err != nil {
-		return nil, fmt.Errorf("failed to read message body: %w", err)
-	}
+func (r *MessageReader) tryParseMessage(totalLen int) (*Message, error) {
+	data := r.buffer[r.pos : r.pos+totalLen]
 
 	// Verify CRC
-	receivedCRC := binary.LittleEndian.Uint32(msgData[totalSize-4:])
-	calculatedCRC := calculateCRC32(msgData[:totalSize-4])
+	receivedCRC := binary.LittleEndian.Uint32(data[totalLen-4:])
+	calculatedCRC := calculateCRC32(data[:totalLen-4])
 	if receivedCRC != calculatedCRC {
-		return nil, fmt.Errorf("CRC mismatch: got %d, expected %d", receivedCRC, calculatedCRC)
+		return nil, ErrCRCMismatch
 	}
 
-	// Extract topic and payload (exclude CRC)
-	topic := string(msgData[8 : 8+topicLen])
-	payload := msgData[8+topicLen : totalSize-4]
+	// Extract message fields
+	topicLen := binary.LittleEndian.Uint32(data[0:4])
+	payloadLen := binary.LittleEndian.Uint32(data[4:8])
+	topic := string(data[8 : 8+topicLen])
+	payload := data[8+topicLen : 8+topicLen+payloadLen]
+
+	// Advance past this message
+	r.pos += totalLen
 
 	return &Message{
 		Topic:   topic,
 		Payload: payload,
 	}, nil
+}
+
+// Update existing readMessage to use MessageReader
+func readMessage(r io.Reader) (*Message, error) {
+	reader := NewMessageReader(r)
+	return reader.ReadMessage()
 }
 
 func writeMessage(w io.Writer, msg *Message) error {
@@ -485,7 +549,10 @@ func writeMessage(w io.Writer, msg *Message) error {
 	crc := calculateCRC32(msgData[:totalSize-4])
 	binary.LittleEndian.PutUint32(msgData[totalSize-4:], crc)
 
-	// Write entire message
-	_, err := w.Write(msgData)
+	// Write entire message and log bytes
+	n, err := w.Write(msgData)
+	if n > 0 {
+		log.Debug("Sent %d bytes: % x", n, msgData[:n])
+	}
 	return err
 }

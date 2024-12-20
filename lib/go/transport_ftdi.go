@@ -1,6 +1,7 @@
 package qdp
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -19,6 +20,8 @@ type FTDITransport struct {
 	connectionHandler IConnectionHandler
 	disconnected      atomic.Bool
 	config            FTDIConfig // Store configuration for reconnect
+	ctx               context.Context
+	cancel            context.CancelFunc
 }
 
 // FTDIConfig holds configuration for FTDI transport
@@ -50,12 +53,16 @@ var DefaultFTDIConfig = FTDIConfig{
 }
 
 func NewFTDITransport(config FTDIConfig, connectionHandler IConnectionHandler) (*FTDITransport, error) {
+	ctx, cancel := context.WithCancel(context.Background())
 	t := &FTDITransport{
 		config:            config,
 		connectionHandler: connectionHandler,
+		ctx:               ctx,
+		cancel:            cancel,
 	}
 
 	if err := t.connect(gousb.NewContext()); err != nil {
+		cancel()
 		return nil, err
 	}
 
@@ -259,7 +266,10 @@ func (t *FTDITransport) closeResources() {
 }
 
 func (t *FTDITransport) ReadMessage() (*Message, error) {
-	reader := &endpointReader{t.inEndpoint}
+	reader := &endpointReader{
+		ep:  t.inEndpoint,
+		ctx: t.ctx,
+	}
 	msg, err := readMessage(reader)
 
 	if err != nil {
@@ -297,7 +307,7 @@ func (t *FTDITransport) WriteMessage(msg *Message) error {
 		return err
 	}
 
-	_, err = t.outEndpoint.Write(encoded)
+	_, err = t.outEndpoint.WriteContext(t.ctx, encoded)
 	if err != nil {
 		if isUsbDisconnectError(err) && !t.disconnected.Load() {
 			t.disconnected.Store(true)
@@ -317,6 +327,9 @@ func (t *FTDITransport) WriteMessage(msg *Message) error {
 }
 
 func (t *FTDITransport) Close() error {
+	// Cancel context first to interrupt any pending reads/writes
+	t.cancel()
+
 	if t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
 		t.connectionHandler.OnDisconnect(t, nil)
 	}
@@ -347,9 +360,11 @@ func isUsbDisconnectError(err error) bool {
 
 // endpointReader implements io.Reader for USB endpoints
 type endpointReader struct {
-	ep *gousb.InEndpoint
+	ep  *gousb.InEndpoint
+	ctx context.Context
 }
 
 func (r *endpointReader) Read(p []byte) (n int, err error) {
-	return r.ep.Read(p)
+	// Use ReadContext instead of Read
+	return r.ep.ReadContext(r.ctx, p)
 }
