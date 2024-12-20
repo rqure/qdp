@@ -3,6 +3,8 @@ package qdp
 import (
 	"fmt"
 	"io"
+	"os"
+	"strings"
 	"sync/atomic"
 
 	"github.com/google/gousb"
@@ -13,6 +15,7 @@ type FTDITransport struct {
 	context           *gousb.Context
 	device            *gousb.Device
 	config            *gousb.Config
+	intf              *gousb.Interface // Add interface tracking
 	inEndpoint        *gousb.InEndpoint
 	outEndpoint       *gousb.OutEndpoint
 	connectionHandler IConnectionHandler
@@ -151,6 +154,7 @@ func NewFTDITransport(config FTDIConfig, connectionHandler IConnectionHandler) (
 		context:           ctx,
 		device:            device,
 		config:            cfg,
+		intf:              intf, // Store interface
 		inEndpoint:        inEndpoint,
 		outEndpoint:       outEndpoint,
 		connectionHandler: connectionHandler,
@@ -164,22 +168,50 @@ func NewFTDITransport(config FTDIConfig, connectionHandler IConnectionHandler) (
 }
 
 func (t *FTDITransport) ReadMessage() (*Message, error) {
-	// Buffer to read header (8 bytes: topic length + payload length)
-	header := make([]byte, 8)
-	_, err := io.ReadFull(&endpointReader{t.inEndpoint}, header)
-	if err != nil {
-		if err != io.EOF && t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
-			t.connectionHandler.OnDisconnect(t, err)
-		}
-		return nil, err
-	}
+	// Create endpointReader once
+	reader := &endpointReader{t.inEndpoint}
 
 	// Read message using helper function
-	msg, err := readMessage(&endpointReader{t.inEndpoint})
-	if err != nil && t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
+	msg, err := readMessage(reader)
+	if err != nil && isFatalError(err) && t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
 		t.connectionHandler.OnDisconnect(t, err)
 	}
 	return msg, err
+}
+
+// isFatalError determines if an error should cause a disconnect
+func isFatalError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// I/O errors are fatal
+	if err == io.EOF || err == io.ErrUnexpectedEOF {
+		return true
+	}
+
+	// USB specific errors are fatal
+	if err == gousb.ErrorTimeout || err == gousb.ErrorNoDevice || err == gousb.ErrorBusy {
+		return true
+	}
+
+	// Message format errors are non-fatal
+	if err == ErrInvalidMessage || err == ErrCRCMismatch {
+		return false
+	}
+	if strings.Contains(err.Error(), "invalid topic length") ||
+		strings.Contains(err.Error(), "message too large") ||
+		strings.Contains(err.Error(), "CRC mismatch") {
+		return false
+	}
+
+	// Consider other I/O errors fatal
+	if _, ok := err.(*os.PathError); ok {
+		return true
+	}
+
+	// By default, treat unknown errors as non-fatal
+	return false
 }
 
 func (t *FTDITransport) WriteMessage(msg *Message) error {
@@ -194,18 +226,32 @@ func (t *FTDITransport) WriteMessage(msg *Message) error {
 
 func (t *FTDITransport) Close() error {
 	var err error
-	if t.config != nil {
-		err = t.config.Close()
+
+	// Close in reverse order of creation
+	if t.intf != nil {
+		t.intf.Close()
+		t.intf = nil
 	}
+
+	if t.config != nil {
+		if cfgErr := t.config.Close(); cfgErr != nil {
+			err = cfgErr
+		}
+		t.config = nil
+	}
+
 	if t.device != nil {
 		if devErr := t.device.Close(); devErr != nil && err == nil {
 			err = devErr
 		}
+		t.device = nil
 	}
+
 	if t.context != nil {
 		if ctxErr := t.context.Close(); ctxErr != nil && err == nil {
 			err = ctxErr
 		}
+		t.context = nil
 	}
 
 	if t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
