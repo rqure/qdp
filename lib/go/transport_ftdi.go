@@ -21,20 +21,30 @@ type FTDITransport struct {
 
 // FTDIConfig holds configuration for FTDI transport
 type FTDIConfig struct {
-	VID       uint16 // Vendor ID
-	PID       uint16 // Product ID
-	Interface int    // Interface number
-	ReadEP    int    // Read endpoint number
-	WriteEP   int    // Write endpoint number
+	VID         uint16 // Vendor ID
+	PID         uint16 // Product ID
+	Interface   int    // Interface number
+	ReadEP      int    // Read endpoint number
+	WriteEP     int    // Write endpoint number
+	BaudRate    int    // Baud rate for UART
+	DataBits    int    // Data bits (5, 6, 7, 8)
+	StopBits    int    // Stop bits (1, 2)
+	Parity      int    // Parity (0=none, 1=odd, 2=even)
+	FlowControl int    // Flow control (0=none, 1=hardware)
 }
 
 // DefaultFTDIConfig provides default configuration for common FTDI devices
 var DefaultFTDIConfig = FTDIConfig{
-	VID:       0x0403, // FTDI default VID
-	PID:       0x6001, // FT232R default PID
-	Interface: 0,
-	ReadEP:    0x81, // EP1 IN
-	WriteEP:   0x01, // EP1 OUT
+	VID:         0x0403, // FTDI default VID
+	PID:         0x6001, // FT232R default PID
+	Interface:   0,
+	ReadEP:      0x81, // EP1 IN
+	WriteEP:     0x01, // EP1 OUT
+	BaudRate:    115200,
+	DataBits:    8,
+	StopBits:    1,
+	Parity:      0,
+	FlowControl: 0,
 }
 
 func NewFTDITransport(config FTDIConfig, connectionHandler IConnectionHandler) (*FTDITransport, error) {
@@ -92,6 +102,49 @@ func NewFTDITransport(config FTDIConfig, connectionHandler IConnectionHandler) (
 		device.Close()
 		ctx.Close()
 		return nil, fmt.Errorf("failed to get OUT endpoint: %w", err)
+	}
+
+	// Configure UART settings
+	if _, err := device.Control(
+		0x40, // vendor request out
+		0x03, // SET_BAUDRATE
+		uint16(config.BaudRate),
+		0,
+		nil,
+	); err != nil {
+		device.Close()
+		ctx.Close()
+		return nil, fmt.Errorf("failed to set baud rate: %w", err)
+	}
+
+	// Configure line properties (data bits, stop bits, parity)
+	lineParams := uint16(config.DataBits) |
+		(uint16(config.StopBits) << 11) |
+		(uint16(config.Parity) << 8)
+
+	if _, err := device.Control(
+		0x40, // vendor request out
+		0x04, // SET_LINE_PROPERTY
+		lineParams,
+		0,
+		nil,
+	); err != nil {
+		device.Close()
+		ctx.Close()
+		return nil, fmt.Errorf("failed to set line properties: %w", err)
+	}
+
+	// Configure flow control
+	if _, err := device.Control(
+		0x40,
+		0x02, // SET_FLOW_CTRL
+		uint16(config.FlowControl),
+		0,
+		nil,
+	); err != nil {
+		device.Close()
+		ctx.Close()
+		return nil, fmt.Errorf("failed to set flow control: %w", err)
 	}
 
 	t := &FTDITransport{

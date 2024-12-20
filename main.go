@@ -35,6 +35,7 @@ func main() {
 
 	schemaValidator.RegisterEntityFields("QdpFtdiTransport", // entity type
 		"VendorID", "ProductID", "Interface", "ReadEndpoint", "WriteEndpoint",
+		"BaudRate", "DataBits", "StopBits", "Parity", "FlowControl",
 		"IsEnabled", "IsConnected", "TotalReceived", "TotalSent") // entity fields
 
 	schemaValidator.RegisterEntityFields("QdpTopic", // entity type

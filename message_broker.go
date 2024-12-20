@@ -266,12 +266,24 @@ func (w *MessageBroker) setupFtdiTransport(ctx context.Context, transportEntity 
 	readEp := transportEntity.GetField("ReadEndpoint").ReadInt(ctx)
 	writeEp := transportEntity.GetField("WriteEndpoint").ReadInt(ctx)
 
+	// Get UART configuration
+	baudRate := transportEntity.GetField("BaudRate").ReadInt(ctx)
+	dataBits := transportEntity.GetField("DataBits").ReadInt(ctx)
+	stopBits := transportEntity.GetField("StopBits").ReadInt(ctx)
+	parity := transportEntity.GetField("Parity").ReadInt(ctx)
+	flowControl := transportEntity.GetField("FlowControl").ReadInt(ctx)
+
 	config := qdp.FTDIConfig{
-		VID:       vid,
-		PID:       pid,
-		Interface: int(iface),
-		ReadEP:    int(readEp),
-		WriteEP:   int(writeEp),
+		VID:         vid,
+		PID:         pid,
+		Interface:   int(iface),
+		ReadEP:      int(readEp),
+		WriteEP:     int(writeEp),
+		BaudRate:    int(baudRate),
+		DataBits:    int(dataBits),
+		StopBits:    int(stopBits),
+		Parity:      int(parity),
+		FlowControl: int(flowControl),
 	}
 
 	_, err := qdp.NewFTDITransport(config, connectionHandler)
@@ -310,6 +322,13 @@ func (w *MessageBroker) setup(ctx context.Context) {
 				"TransportReference",
 			}),
 		notification.NewCallback(w.onTxMessage)))
+
+	w.tokens = append(w.tokens, w.store.Notify(
+		ctx,
+		notification.NewConfig().
+			SetEntityType("QdpFtdiTransport").
+			SetFieldName("IsEnabled"),
+		notification.NewCallback(w.onFtdiTransportIsEnabledChanged)))
 
 	tcpTransports := query.New(w.store).ForType("QdpTcpTransport").Execute(ctx)
 
@@ -393,6 +412,33 @@ func (w *MessageBroker) onTcpTransportIsEnabledChanged(ctx context.Context, noti
 	if isEnabled {
 		log.Info("Enabling transport %s", transportEntity.GetId())
 		w.setupTcpTransport(ctx, transportEntity)
+	}
+}
+
+func (w *MessageBroker) onFtdiTransportIsEnabledChanged(ctx context.Context, notification data.Notification) {
+	transportEntity := binding.NewEntity(ctx, w.store, notification.GetCurrent().GetEntityId())
+	isEnabled := notification.GetCurrent().GetValue().GetBool()
+
+	// Get existing protocol if any
+	existingProtocol := w.protocolsByEntity[transportEntity.GetId()]
+
+	// If disabled, cleanup existing protocol
+	if !isEnabled && existingProtocol != nil {
+		log.Info("Disabling FTDI transport %s", transportEntity.GetId())
+		existingProtocol.Close()
+		delete(w.protocolsByEntity, transportEntity.GetId())
+		return
+	}
+
+	// If already enabled with protocol, nothing to do
+	if isEnabled && existingProtocol != nil {
+		log.Debug("FTDI transport %s is already enabled", transportEntity.GetId())
+		return
+	}
+
+	if isEnabled {
+		log.Info("Enabling FTDI transport %s", transportEntity.GetId())
+		w.setupFtdiTransport(ctx, transportEntity)
 	}
 }
 

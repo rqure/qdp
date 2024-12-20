@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/rqure/qlib/pkg/log"
 )
 
 // Common errors
@@ -407,4 +411,81 @@ func calculateCRC32(data []byte) uint32 {
 		crc = (crc >> 8) ^ crc32Table[byte(crc)^b]
 	}
 	return crc ^ 0xFFFFFFFF
+}
+
+// Helper functions for message encoding/decoding
+func readMessage(r io.Reader) (*Message, error) {
+	// Read header (8 bytes: topic length + payload length)
+	header := make([]byte, 8)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return nil, err
+	}
+
+	topicLen := binary.LittleEndian.Uint32(header[0:4])
+	payloadLen := binary.LittleEndian.Uint32(header[4:8])
+
+	log.Trace("readMessage: topicLen=%d, payloadLen=%d", topicLen, payloadLen)
+
+	if topicLen == 0 {
+		return nil, fmt.Errorf("invalid topic length: %d", topicLen)
+	}
+
+	// Calculate total message size including CRC
+	totalSize := 8 + topicLen + payloadLen + 4 // +4 for CRC
+
+	if totalSize > 1024 {
+		return nil, fmt.Errorf("message too large: %d bytes", totalSize)
+	}
+
+	// Read entire message including CRC
+	msgData := make([]byte, totalSize)
+	copy(msgData[0:8], header) // Copy header into full message buffer
+
+	// Read rest of message (topic + payload + CRC)
+	if _, err := io.ReadFull(r, msgData[8:]); err != nil {
+		log.Error("readMessage: error reading message: %v", err)
+		return nil, err
+	}
+
+	// Verify CRC
+	receivedCRC := binary.LittleEndian.Uint32(msgData[totalSize-4:])
+	calculatedCRC := calculateCRC32(msgData[:totalSize-4])
+	if receivedCRC != calculatedCRC {
+		return nil, fmt.Errorf("CRC mismatch: got %d, expected %d", receivedCRC, calculatedCRC)
+	}
+
+	// Extract topic and payload (exclude CRC)
+	topic := string(msgData[8 : 8+topicLen])
+	payload := msgData[8+topicLen : totalSize-4]
+
+	return &Message{
+		Topic:   topic,
+		Payload: payload,
+	}, nil
+}
+
+func writeMessage(w io.Writer, msg *Message) error {
+	// Calculate sizes
+	topicLen := uint32(len(msg.Topic))
+	payloadLen := uint32(len(msg.Payload))
+	totalSize := 8 + topicLen + payloadLen + 4 // +4 for CRC
+
+	// Create buffer for entire message
+	msgData := make([]byte, totalSize)
+
+	// Write header
+	binary.LittleEndian.PutUint32(msgData[0:4], topicLen)
+	binary.LittleEndian.PutUint32(msgData[4:8], payloadLen)
+
+	// Write topic and payload
+	copy(msgData[8:], msg.Topic)
+	copy(msgData[8+topicLen:], msg.Payload)
+
+	// Calculate and write CRC
+	crc := calculateCRC32(msgData[:totalSize-4])
+	binary.LittleEndian.PutUint32(msgData[totalSize-4:], crc)
+
+	// Write entire message
+	_, err := w.Write(msgData)
+	return err
 }
