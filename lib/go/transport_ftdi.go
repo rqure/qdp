@@ -168,15 +168,47 @@ func NewFTDITransport(config FTDIConfig, connectionHandler IConnectionHandler) (
 }
 
 func (t *FTDITransport) ReadMessage() (*Message, error) {
-	// Create endpointReader once
 	reader := &endpointReader{t.inEndpoint}
 
-	// Read message using helper function
 	msg, err := readMessage(reader)
-	if err != nil && isFatalError(err) && t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
-		t.connectionHandler.OnDisconnect(t, err)
+	if err != nil {
+		if isUsbDisconnectError(err) && !t.disconnected.Load() {
+			// Handle USB disconnection
+			t.disconnected.Store(true)
+			if t.connectionHandler != nil {
+				t.connectionHandler.OnDisconnect(t, fmt.Errorf("USB device disconnected: %v", err))
+			}
+		} else if isFatalError(err) && !t.disconnected.Load() {
+			// Handle other fatal errors
+			t.disconnected.Store(true)
+			if t.connectionHandler != nil {
+				t.connectionHandler.OnDisconnect(t, err)
+			}
+		}
+		// Return the error regardless of whether it's fatal or not
+		return nil, err
 	}
-	return msg, err
+	return msg, nil
+}
+
+// Add new helper function to detect USB disconnection errors
+func isUsbDisconnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Common USB disconnection error patterns
+	if err == gousb.ErrorNoDevice || err == gousb.ErrorNotFound {
+		return true
+	}
+
+	errStr := err.Error()
+	return strings.Contains(errStr, "no such device") ||
+		strings.Contains(errStr, "device not responding") ||
+		strings.Contains(errStr, "device disconnected") ||
+		strings.Contains(errStr, "endpoint not found") ||
+		strings.Contains(errStr, "pipe error") ||
+		strings.Contains(errStr, "operation timed out")
 }
 
 // isFatalError determines if an error should cause a disconnect
@@ -221,6 +253,12 @@ func (t *FTDITransport) WriteMessage(msg *Message) error {
 	}
 
 	_, err = t.outEndpoint.Write(encoded)
+	if err != nil && isUsbDisconnectError(err) && !t.disconnected.Load() {
+		t.disconnected.Store(true)
+		if t.connectionHandler != nil {
+			t.connectionHandler.OnDisconnect(t, fmt.Errorf("USB device disconnected: %v", err))
+		}
+	}
 	return err
 }
 
