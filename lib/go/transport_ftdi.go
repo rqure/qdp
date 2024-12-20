@@ -2,8 +2,6 @@ package qdp
 
 import (
 	"fmt"
-	"io"
-	"os"
 	"strings"
 	"sync/atomic"
 
@@ -14,12 +12,13 @@ import (
 type FTDITransport struct {
 	context           *gousb.Context
 	device            *gousb.Device
-	config            *gousb.Config
-	intf              *gousb.Interface // Add interface tracking
+	usbConfig         *gousb.Config
+	intf              *gousb.Interface
 	inEndpoint        *gousb.InEndpoint
 	outEndpoint       *gousb.OutEndpoint
 	connectionHandler IConnectionHandler
 	disconnected      atomic.Bool
+	config            FTDIConfig // Store configuration for reconnect
 }
 
 // FTDIConfig holds configuration for FTDI transport
@@ -51,24 +50,36 @@ var DefaultFTDIConfig = FTDIConfig{
 }
 
 func NewFTDITransport(config FTDIConfig, connectionHandler IConnectionHandler) (*FTDITransport, error) {
-	ctx := gousb.NewContext()
+	t := &FTDITransport{
+		config:            config,
+		connectionHandler: connectionHandler,
+	}
 
-	device, err := ctx.OpenDeviceWithVIDPID(gousb.ID(config.VID), gousb.ID(config.PID))
+	if err := t.connect(gousb.NewContext()); err != nil {
+		return nil, err
+	}
+
+	return t, nil
+}
+
+// Add new method to handle connection setup
+func (t *FTDITransport) connect(ctx *gousb.Context) error {
+	device, err := ctx.OpenDeviceWithVIDPID(gousb.ID(t.config.VID), gousb.ID(t.config.PID))
 	if err != nil {
 		ctx.Close()
-		return nil, fmt.Errorf("failed to open device: %w", err)
+		return fmt.Errorf("failed to open device: %w", err)
 	}
 
 	if device == nil {
 		ctx.Close()
-		return nil, fmt.Errorf("device not found")
+		return fmt.Errorf("device not found")
 	}
 
 	// Set auto detach for kernel drivers
 	if err := device.SetAutoDetach(true); err != nil {
 		device.Close()
 		ctx.Close()
-		return nil, fmt.Errorf("failed to set auto detach: %w", err)
+		return fmt.Errorf("failed to set auto detach: %w", err)
 	}
 
 	// Get default configuration
@@ -76,54 +87,57 @@ func NewFTDITransport(config FTDIConfig, connectionHandler IConnectionHandler) (
 	if err != nil {
 		device.Close()
 		ctx.Close()
-		return nil, fmt.Errorf("failed to get config: %w", err)
+		return fmt.Errorf("failed to get config: %w", err)
 	}
 
 	// Claim interface
-	intf, err := cfg.Interface(config.Interface, 0)
+	intf, err := cfg.Interface(t.config.Interface, 0)
 	if err != nil {
 		cfg.Close()
 		device.Close()
 		ctx.Close()
-		return nil, fmt.Errorf("failed to claim interface: %w", err)
+		return fmt.Errorf("failed to claim interface: %w", err)
 	}
 
 	// Get endpoints
-	inEndpoint, err := intf.InEndpoint(config.ReadEP)
+	inEndpoint, err := intf.InEndpoint(t.config.ReadEP)
 	if err != nil {
 		intf.Close()
 		cfg.Close()
 		device.Close()
 		ctx.Close()
-		return nil, fmt.Errorf("failed to get IN endpoint: %w", err)
+		return fmt.Errorf("failed to get IN endpoint: %w", err)
 	}
 
-	outEndpoint, err := intf.OutEndpoint(config.WriteEP)
+	outEndpoint, err := intf.OutEndpoint(t.config.WriteEP)
 	if err != nil {
 		intf.Close()
 		cfg.Close()
 		device.Close()
 		ctx.Close()
-		return nil, fmt.Errorf("failed to get OUT endpoint: %w", err)
+		return fmt.Errorf("failed to get OUT endpoint: %w", err)
 	}
 
 	// Configure UART settings
+	valueL, valueH := calculateFTDIBaudRateDivisor(t.config.BaudRate)
+
+	// Set divisor low byte
 	if _, err := device.Control(
-		0x40, // vendor request out
-		0x03, // SET_BAUDRATE
-		uint16(config.BaudRate),
-		0,
+		0x40,   // vendor request out
+		0x03,   // SET_BAUDRATE
+		valueL, // Divisor low byte
+		valueH, // Divisor high byte
 		nil,
 	); err != nil {
 		device.Close()
 		ctx.Close()
-		return nil, fmt.Errorf("failed to set baud rate: %w", err)
+		return fmt.Errorf("failed to set baud rate: %w", err)
 	}
 
 	// Configure line properties (data bits, stop bits, parity)
-	lineParams := uint16(config.DataBits) |
-		(uint16(config.StopBits) << 11) |
-		(uint16(config.Parity) << 8)
+	lineParams := uint16(t.config.DataBits) |
+		(uint16(t.config.StopBits) << 11) |
+		(uint16(t.config.Parity) << 8)
 
 	if _, err := device.Control(
 		0x40, // vendor request out
@@ -134,61 +148,181 @@ func NewFTDITransport(config FTDIConfig, connectionHandler IConnectionHandler) (
 	); err != nil {
 		device.Close()
 		ctx.Close()
-		return nil, fmt.Errorf("failed to set line properties: %w", err)
+		return fmt.Errorf("failed to set line properties: %w", err)
 	}
 
 	// Configure flow control
 	if _, err := device.Control(
 		0x40,
 		0x02, // SET_FLOW_CTRL
-		uint16(config.FlowControl),
+		uint16(t.config.FlowControl),
 		0,
 		nil,
 	); err != nil {
 		device.Close()
 		ctx.Close()
-		return nil, fmt.Errorf("failed to set flow control: %w", err)
+		return fmt.Errorf("failed to set flow control: %w", err)
 	}
 
-	t := &FTDITransport{
-		context:           ctx,
-		device:            device,
-		config:            cfg,
-		intf:              intf, // Store interface
-		inEndpoint:        inEndpoint,
-		outEndpoint:       outEndpoint,
-		connectionHandler: connectionHandler,
+	t.context = ctx
+	t.device = device
+	t.usbConfig = cfg // Use renamed field
+	t.intf = intf
+	t.inEndpoint = inEndpoint
+	t.outEndpoint = outEndpoint
+
+	t.disconnected.Store(false)
+	if t.connectionHandler != nil {
+		t.connectionHandler.OnConnect(t)
 	}
 
-	if connectionHandler != nil {
-		connectionHandler.OnConnect(t)
+	return nil
+}
+
+func calculateFTDIBaudRateDivisor(baudRate int) (uint16, uint16) {
+	// FTDI uses a 3 MHz reference clock
+	const baseClock = 3000000
+
+	// Calculate divisor
+	divisor := float64(baseClock) / float64(baudRate)
+
+	// Extract integer and sub-integer parts
+	integerPart := int(divisor)
+	subIntegerPart := divisor - float64(integerPart)
+
+	// Map sub-integer parts to closest achievable values
+	var prescaler int
+	switch {
+	case subIntegerPart < 0.0625:
+		prescaler = 0
+	case subIntegerPart < 0.1875:
+		prescaler = 0x1000
+	case subIntegerPart < 0.3125:
+		prescaler = 0x2000
+	case subIntegerPart < 0.4375:
+		prescaler = 0x3000
+	case subIntegerPart < 0.5625:
+		prescaler = 0x4000
+	case subIntegerPart < 0.6875:
+		prescaler = 0x5000
+	case subIntegerPart < 0.8125:
+		prescaler = 0x6000
+	case subIntegerPart < 0.9375:
+		prescaler = 0x7000
+	default:
+		integerPart++
+		prescaler = 0
 	}
 
-	return t, nil
+	// Combine integer part and prescaler
+	finalDivisor := (integerPart & 0x3FFF) | prescaler
+
+	// Split into high and low bytes
+	valueH := uint16((finalDivisor >> 8) & 0xFF)
+	valueL := uint16(finalDivisor & 0xFF)
+
+	return valueL, valueH
+}
+
+// Add new method to attempt reconnection
+func (t *FTDITransport) tryReconnect() error {
+	// Clean up old connection first
+	t.closeResources()
+
+	// Try to establish new connection
+	ctx := gousb.NewContext()
+	if err := t.connect(ctx); err != nil {
+		ctx.Close()
+		return err
+	}
+
+	return nil
+}
+
+func (t *FTDITransport) closeResources() {
+	if t.intf != nil {
+		t.intf.Close()
+		t.intf = nil
+	}
+	if t.usbConfig != nil { // Use renamed field
+		t.usbConfig.Close()
+		t.usbConfig = nil
+	}
+	if t.device != nil {
+		t.device.Close()
+		t.device = nil
+	}
+	if t.context != nil {
+		t.context.Close()
+		t.context = nil
+	}
 }
 
 func (t *FTDITransport) ReadMessage() (*Message, error) {
 	reader := &endpointReader{t.inEndpoint}
-
 	msg, err := readMessage(reader)
+
 	if err != nil {
 		if isUsbDisconnectError(err) && !t.disconnected.Load() {
-			// Handle USB disconnection
+			t.disconnected.Store(true)
+			if t.connectionHandler != nil {
+				t.connectionHandler.OnDisconnect(t, fmt.Errorf("USB device disconnected: %v", err))
+				// Try to reconnect on next read
+				return nil, err
+			}
+		} else if t.disconnected.Load() {
+			// Try reconnecting if we're disconnected
+			if err := t.tryReconnect(); err == nil {
+				// Retry reading after successful reconnection
+				return t.ReadMessage()
+			}
+		}
+		return nil, err
+	}
+
+	// If we got here after being disconnected, we're reconnected
+	if t.disconnected.Load() {
+		t.disconnected.Store(false)
+		if t.connectionHandler != nil {
+			t.connectionHandler.OnConnect(t)
+		}
+	}
+
+	return msg, nil
+}
+
+func (t *FTDITransport) WriteMessage(msg *Message) error {
+	encoded, err := msg.Encode()
+	if err != nil {
+		return err
+	}
+
+	_, err = t.outEndpoint.Write(encoded)
+	if err != nil {
+		if isUsbDisconnectError(err) && !t.disconnected.Load() {
 			t.disconnected.Store(true)
 			if t.connectionHandler != nil {
 				t.connectionHandler.OnDisconnect(t, fmt.Errorf("USB device disconnected: %v", err))
 			}
-		} else if isFatalError(err) && !t.disconnected.Load() {
-			// Handle other fatal errors
-			t.disconnected.Store(true)
-			if t.connectionHandler != nil {
-				t.connectionHandler.OnDisconnect(t, err)
+		} else if t.disconnected.Load() {
+			// Try reconnecting if we're disconnected
+			if err := t.tryReconnect(); err == nil {
+				// Retry writing after successful reconnection
+				return t.WriteMessage(msg)
 			}
 		}
-		// Return the error regardless of whether it's fatal or not
-		return nil, err
 	}
-	return msg, nil
+
+	return err
+}
+
+func (t *FTDITransport) Close() error {
+	if t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
+		t.connectionHandler.OnDisconnect(t, nil)
+	}
+
+	t.closeResources()
+	return nil
 }
 
 // Add new helper function to detect USB disconnection errors
@@ -209,94 +343,6 @@ func isUsbDisconnectError(err error) bool {
 		strings.Contains(errStr, "endpoint not found") ||
 		strings.Contains(errStr, "pipe error") ||
 		strings.Contains(errStr, "operation timed out")
-}
-
-// isFatalError determines if an error should cause a disconnect
-func isFatalError(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	// I/O errors are fatal
-	if err == io.EOF || err == io.ErrUnexpectedEOF {
-		return true
-	}
-
-	// USB specific errors are fatal
-	if err == gousb.ErrorTimeout || err == gousb.ErrorNoDevice || err == gousb.ErrorBusy {
-		return true
-	}
-
-	// Message format errors are non-fatal
-	if err == ErrInvalidMessage || err == ErrCRCMismatch {
-		return false
-	}
-	if strings.Contains(err.Error(), "invalid topic length") ||
-		strings.Contains(err.Error(), "message too large") ||
-		strings.Contains(err.Error(), "CRC mismatch") {
-		return false
-	}
-
-	// Consider other I/O errors fatal
-	if _, ok := err.(*os.PathError); ok {
-		return true
-	}
-
-	// By default, treat unknown errors as non-fatal
-	return false
-}
-
-func (t *FTDITransport) WriteMessage(msg *Message) error {
-	encoded, err := msg.Encode()
-	if err != nil {
-		return err
-	}
-
-	_, err = t.outEndpoint.Write(encoded)
-	if err != nil && isUsbDisconnectError(err) && !t.disconnected.Load() {
-		t.disconnected.Store(true)
-		if t.connectionHandler != nil {
-			t.connectionHandler.OnDisconnect(t, fmt.Errorf("USB device disconnected: %v", err))
-		}
-	}
-	return err
-}
-
-func (t *FTDITransport) Close() error {
-	var err error
-
-	// Close in reverse order of creation
-	if t.intf != nil {
-		t.intf.Close()
-		t.intf = nil
-	}
-
-	if t.config != nil {
-		if cfgErr := t.config.Close(); cfgErr != nil {
-			err = cfgErr
-		}
-		t.config = nil
-	}
-
-	if t.device != nil {
-		if devErr := t.device.Close(); devErr != nil && err == nil {
-			err = devErr
-		}
-		t.device = nil
-	}
-
-	if t.context != nil {
-		if ctxErr := t.context.Close(); ctxErr != nil && err == nil {
-			err = ctxErr
-		}
-		t.context = nil
-	}
-
-	if t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
-		t.connectionHandler.OnDisconnect(t, err)
-	}
-
-	return err
 }
 
 // endpointReader implements io.Reader for USB endpoints

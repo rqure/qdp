@@ -419,7 +419,7 @@ func (w *MessageBroker) onFtdiTransportIsEnabledChanged(ctx context.Context, not
 	transportEntity := binding.NewEntity(ctx, w.store, notification.GetCurrent().GetEntityId())
 	isEnabled := notification.GetCurrent().GetValue().GetBool()
 
-	// Get existing protocol if any
+	// Get existing protocol
 	existingProtocol := w.protocolsByEntity[transportEntity.GetId()]
 
 	// If disabled, cleanup existing protocol
