@@ -448,7 +448,10 @@ func (r *MessageReader) readMore() error {
 	// Read more data
 	n, err := r.reader.Read(r.buffer[r.count:])
 	if n > 0 {
-		log.Debug("Received %d bytes: % x", n, r.buffer[r.count:r.count+n])
+		// Only log reads larger than 2 bytes to avoid noise from USB status bytes
+		if n > 2 {
+			log.Debug("Received %d bytes: % x", n, r.buffer[r.count:r.count+n])
+		}
 	}
 	r.count += n
 	return err
