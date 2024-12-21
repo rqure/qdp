@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/gousb"
 )
@@ -22,6 +23,7 @@ type FTDITransport struct {
 	config            FTDIConfig // Store configuration for reconnect
 	ctx               context.Context
 	cancel            context.CancelFunc
+	reader            *MessageReader // Add new field
 }
 
 // FTDIConfig holds configuration for FTDI transport
@@ -65,6 +67,12 @@ func NewFTDITransport(config FTDIConfig, connectionHandler IConnectionHandler) (
 		cancel()
 		return nil, err
 	}
+
+	// Initialize reader after successful connection
+	t.reader = NewMessageReader(&endpointReader{
+		ep:  t.inEndpoint,
+		ctx: t.ctx,
+	})
 
 	return t, nil
 }
@@ -178,6 +186,12 @@ func (t *FTDITransport) connect(ctx *gousb.Context) error {
 	t.inEndpoint = inEndpoint
 	t.outEndpoint = outEndpoint
 
+	// Reset reader after reconnection
+	t.reader = NewMessageReader(&endpointReader{
+		ep:  t.inEndpoint,
+		ctx: t.ctx,
+	})
+
 	t.disconnected.Store(false)
 	if t.connectionHandler != nil {
 		t.connectionHandler.OnConnect(t)
@@ -233,6 +247,9 @@ func calculateFTDIBaudRateDivisor(baudRate int) (uint16, uint16) {
 
 // Add new method to attempt reconnection
 func (t *FTDITransport) tryReconnect() error {
+	// Wait a bit before attempting reconnection
+	time.Sleep(100 * time.Millisecond)
+
 	// Clean up old connection first
 	t.closeResources()
 
@@ -266,31 +283,26 @@ func (t *FTDITransport) closeResources() {
 }
 
 func (t *FTDITransport) ReadMessage() (*Message, error) {
-	reader := &endpointReader{
-		ep:  t.inEndpoint,
-		ctx: t.ctx,
-	}
-	msg, err := readMessage(reader)
+	msg, err := t.reader.ReadMessage()
 
 	if err != nil {
 		if isUsbDisconnectError(err) && !t.disconnected.Load() {
 			t.disconnected.Store(true)
 			if t.connectionHandler != nil {
 				t.connectionHandler.OnDisconnect(t, fmt.Errorf("USB device disconnected: %v", err))
-				// Try to reconnect on next read
-				return nil, err
-			}
-		} else if t.disconnected.Load() {
-			// Try reconnecting if we're disconnected
-			if err := t.tryReconnect(); err == nil {
-				// Retry reading after successful reconnection
-				return t.ReadMessage()
 			}
 		}
-		return nil, err
+
+		// Try reconnecting if we hit any error
+		if err := t.tryReconnect(); err != nil {
+			return nil, fmt.Errorf("reconnect failed: %v", err)
+		}
+
+		// Retry reading after successful reconnection
+		return t.reader.ReadMessage()
 	}
 
-	// If we got here after being disconnected, we're reconnected
+	// Clear disconnected flag if we successfully read
 	if t.disconnected.Load() {
 		t.disconnected.Store(false)
 		if t.connectionHandler != nil {
@@ -302,6 +314,7 @@ func (t *FTDITransport) ReadMessage() (*Message, error) {
 }
 
 func (t *FTDITransport) WriteMessage(msg *Message) error {
+	// Try writing first
 	encoded, err := msg.Encode()
 	if err != nil {
 		return err
@@ -314,16 +327,29 @@ func (t *FTDITransport) WriteMessage(msg *Message) error {
 			if t.connectionHandler != nil {
 				t.connectionHandler.OnDisconnect(t, fmt.Errorf("USB device disconnected: %v", err))
 			}
-		} else if t.disconnected.Load() {
-			// Try reconnecting if we're disconnected
-			if err := t.tryReconnect(); err == nil {
-				// Retry writing after successful reconnection
-				return t.WriteMessage(msg)
-			}
+		}
+
+		// Try reconnecting
+		if err := t.tryReconnect(); err != nil {
+			return fmt.Errorf("reconnect failed: %v", err)
+		}
+
+		// Retry writing after successful reconnection
+		_, err = t.outEndpoint.WriteContext(t.ctx, encoded)
+		if err != nil {
+			return err
 		}
 	}
 
-	return err
+	// Clear disconnected flag if we successfully wrote
+	if t.disconnected.Load() {
+		t.disconnected.Store(false)
+		if t.connectionHandler != nil {
+			t.connectionHandler.OnConnect(t)
+		}
+	}
+
+	return nil
 }
 
 func (t *FTDITransport) Close() error {
@@ -350,12 +376,14 @@ func isUsbDisconnectError(err error) bool {
 	}
 
 	errStr := err.Error()
-	return strings.Contains(errStr, "no such device") ||
-		strings.Contains(errStr, "device not responding") ||
-		strings.Contains(errStr, "device disconnected") ||
-		strings.Contains(errStr, "endpoint not found") ||
-		strings.Contains(errStr, "pipe error") ||
-		strings.Contains(errStr, "operation timed out")
+	return strings.Contains(strings.ToLower(errStr), "no such device") ||
+		strings.Contains(strings.ToLower(errStr), "device not responding") ||
+		strings.Contains(strings.ToLower(errStr), "device not found") ||
+		strings.Contains(strings.ToLower(errStr), "device disconnected") ||
+		strings.Contains(strings.ToLower(errStr), "endpoint not found") ||
+		strings.Contains(strings.ToLower(errStr), "pipe error") ||
+		strings.Contains(strings.ToLower(errStr), "operation timed out") ||
+		strings.Contains(strings.ToLower(errStr), "resource temporarily unavailable")
 }
 
 // endpointReader implements io.Reader for USB endpoints

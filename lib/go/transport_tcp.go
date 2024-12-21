@@ -15,7 +15,8 @@ type TCPClientTransport struct {
 	connectionHandler IConnectionHandler
 	ctx               context.Context
 	cancel            context.CancelFunc
-	disconnected      atomic.Bool // Add atomic flag for disconnect state
+	disconnected      atomic.Bool    // Add atomic flag for disconnect state
+	reader            *MessageReader // Add new field
 }
 
 // NewTCPClientTransport creates a new TCP client transport by dialing a server
@@ -33,6 +34,9 @@ func NewTCPClientTransport(address string, connectionHandler IConnectionHandler)
 		cancel:            cancel,
 	}
 
+	// Initialize reader
+	t.reader = NewMessageReader(conn)
+
 	if connectionHandler != nil {
 		connectionHandler.OnConnect(t)
 	}
@@ -43,12 +47,15 @@ func NewTCPClientTransport(address string, connectionHandler IConnectionHandler)
 // NewTCPClientTransportFromConn creates a new TCP client transport from existing connection
 func NewTCPClientTransportFromConn(conn net.Conn, connectionHandler IConnectionHandler) *TCPClientTransport {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &TCPClientTransport{
+	t := &TCPClientTransport{
 		conn:              conn,
 		connectionHandler: connectionHandler,
 		ctx:               ctx,
 		cancel:            cancel,
 	}
+	// Initialize reader
+	t.reader = NewMessageReader(conn)
+	return t
 }
 
 func (t *TCPClientTransport) ReadMessage() (*Message, error) {
@@ -56,7 +63,7 @@ func (t *TCPClientTransport) ReadMessage() (*Message, error) {
 	case <-t.ctx.Done():
 		return nil, io.EOF
 	default:
-		msg, err := readMessage(t.conn)
+		msg, err := t.reader.ReadMessage()
 		if err != nil && t.connectionHandler != nil && t.disconnected.CompareAndSwap(false, true) {
 			t.connectionHandler.OnDisconnect(t, err)
 		}
@@ -93,6 +100,7 @@ type TCPServerTransport struct {
 	clients           sync.Map    // Map of connected clients
 	disconnected      atomic.Bool // Add atomic flag for server disconnect state
 	msgCh             chan *Message
+	readers           sync.Map // Add map to track readers per client
 }
 
 // NewTCPServerTransport creates a new TCP server transport
@@ -162,6 +170,8 @@ func (t *TCPServerTransport) handleClientReads(client *TCPClientTransport) {
 			msg, err := client.ReadMessage()
 			if err != nil {
 				t.clients.Delete(client)
+				// Also remove reader
+				t.readers.Delete(client)
 				return
 			}
 
@@ -175,8 +185,9 @@ func (t *TCPServerTransport) handleClientReads(client *TCPClientTransport) {
 
 				if err := client2.WriteMessage(msg); err != nil {
 					errors = append(errors, err)
-					// Remove failed client
+					// Remove failed client and its reader
 					t.clients.Delete(client2)
+					t.readers.Delete(client2)
 					client2.Close()
 				}
 

@@ -1,6 +1,7 @@
 package qdp
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -77,6 +78,64 @@ func TestTCPClientTransport(t *testing.T) {
 	}
 	if string(readMsg.Payload) != string(testMsg.Payload) {
 		t.Errorf("Payload mismatch: got %v, want %v", string(readMsg.Payload), string(testMsg.Payload))
+	}
+}
+
+func TestTCPClientTransportBufferedReading(t *testing.T) {
+	// Start test server
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Failed to start test server: %v", err)
+	}
+	defer listener.Close()
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// Send multiple messages in quick succession
+		msgs := []*Message{
+			{Topic: "test/1", Payload: []byte("Hello 1")},
+			{Topic: "test/2", Payload: []byte("Hello 2")},
+			{Topic: "test/3", Payload: []byte("Hello 3")},
+		}
+
+		for _, msg := range msgs {
+			if err := writeMessage(conn, msg); err != nil {
+				t.Errorf("Failed to write message: %v", err)
+				return
+			}
+		}
+	}()
+
+	// Create client transport
+	client, err := NewTCPClientTransport(listener.Addr().String(), nil)
+	if err != nil {
+		t.Fatalf("Failed to create client: %v", err)
+	}
+	defer client.Close()
+
+	// Read all messages
+	for i := 1; i <= 3; i++ {
+		msg, err := client.ReadMessage()
+		if err != nil {
+			t.Fatalf("Failed to read message %d: %v", i, err)
+		}
+
+		expectedTopic := fmt.Sprintf("test/%d", i)
+		expectedPayload := fmt.Sprintf("Hello %d", i)
+
+		if msg.Topic != expectedTopic {
+			t.Errorf("Message %d: wrong topic: got %s, want %s", i, msg.Topic, expectedTopic)
+		}
+		if string(msg.Payload) != expectedPayload {
+			t.Errorf("Message %d: wrong payload: got %s, want %s", i, string(msg.Payload), expectedPayload)
+		}
 	}
 }
 
