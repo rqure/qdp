@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -15,7 +16,6 @@ import (
 // Common errors
 var (
 	ErrInvalidMessage = errors.New("invalid message format")
-	ErrCRCMismatch    = errors.New("CRC checksum mismatch")
 )
 
 // IConnectionHandler defines callbacks for transport connection status
@@ -113,7 +113,7 @@ func Decode(data []byte) (*Message, error) {
 	receivedCRC := binary.LittleEndian.Uint32(data[totalLen-4:])
 	calculatedCRC := calculateCRC32(data[:totalLen-4])
 	if receivedCRC != calculatedCRC {
-		return nil, ErrCRCMismatch
+		return nil, fmt.Errorf("CRC checksum mismatch: expected %08x, got %08x", calculatedCRC, receivedCRC)
 	}
 
 	// Extract topic and payload
@@ -437,15 +437,6 @@ func NewMessageReader(reader io.Reader) *MessageReader {
 // ReadMessage handles buffered reading of messages
 func (r *MessageReader) ReadMessage() (*Message, error) {
 	for {
-		// Ensure minimum header size
-		if r.count-r.pos < 8 {
-			if err := r.readMore(); err != nil {
-				if r.count-r.pos < 8 { // Still not enough data after read
-					return nil, err
-				}
-			}
-		}
-
 		// Try to find a valid message start within our current buffer
 		startPos := r.pos
 		for startPos <= r.count-8 {
@@ -462,26 +453,25 @@ func (r *MessageReader) ReadMessage() (*Message, error) {
 					if err == nil {
 						r.pos = startPos + int(totalLen)
 						return msg, nil
+					} else {
+						startPos++
+						return nil, err
 					}
-				} else {
-					// Need more data for complete message
-					if err := r.readMore(); err != nil {
-						// Only return error if we still don't have enough data
-						if startPos+int(totalLen) > r.count {
-							return nil, err
-						}
-					}
-					continue
 				}
 			}
 			startPos++
 		}
 
 		// If we've scanned the whole buffer without finding a message
-		if startPos >= r.count-8 {
-			r.pos = maxInt(r.count-8, 0) // Keep last 8 bytes for potential header
+		// or if we need more data for a potential message
+		if r.count-r.pos < 8 || startPos > r.count-8 {
 			if err := r.readMore(); err != nil {
-				return nil, err
+				// Return error only if we have no data to process
+				if r.count-r.pos < 8 {
+					return nil, err
+				}
+				// Otherwise continue processing existing buffer
+				continue
 			}
 		}
 	}
@@ -498,7 +488,7 @@ func (r *MessageReader) tryParseMessage(start, totalLen int) (*Message, error) {
 	receivedCRC := binary.LittleEndian.Uint32(data[totalLen-4:])
 	calculatedCRC := calculateCRC32(data[:totalLen-4])
 	if receivedCRC != calculatedCRC {
-		return nil, ErrCRCMismatch
+		return nil, fmt.Errorf("CRC checksum mismatch: expected %08x, got %08x", calculatedCRC, receivedCRC)
 	}
 
 	// Extract message fields
@@ -520,11 +510,18 @@ func (r *MessageReader) tryParseMessage(start, totalLen int) (*Message, error) {
 }
 
 func (r *MessageReader) readMore() error {
-	// If buffer is getting full, shift data to beginning
-	if r.count > len(r.buffer)/2 {
+	// If we have processed data, move the remainder to the start
+	if r.pos > 0 {
 		copy(r.buffer, r.buffer[r.pos:r.count])
 		r.count -= r.pos
 		r.pos = 0
+	}
+
+	// If buffer is full, extend it
+	if r.count >= len(r.buffer) {
+		newBuffer := make([]byte, len(r.buffer)*2)
+		copy(newBuffer, r.buffer[:r.count])
+		r.buffer = newBuffer
 	}
 
 	// Read more data
@@ -537,14 +534,6 @@ func (r *MessageReader) readMore() error {
 		return nil // Return nil if we got any data
 	}
 	return err
-}
-
-// Helper function to get max of two ints
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func writeMessage(w io.Writer, msg *Message) error {
