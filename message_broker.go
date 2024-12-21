@@ -317,10 +317,10 @@ func (w *MessageBroker) setup(ctx context.Context) {
 		notification.NewConfig().
 			SetEntityType("QdpTopic").
 			SetFieldName("TxMessage").
-			SetContextFields([]string{
+			SetContextFields(
 				"Topic",
 				"TransportReference",
-			}),
+			),
 		notification.NewCallback(w.onTxMessage)))
 
 	w.tokens = append(w.tokens, w.store.Notify(
