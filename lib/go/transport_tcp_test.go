@@ -40,7 +40,7 @@ func TestTCPClientTransport(t *testing.T) {
 		defer conn.Close()
 
 		// Read message and echo back
-		msg, err := readMessage(conn)
+		msg, err := NewMessageReader(conn).ReadMessage()
 		if err != nil {
 			return
 		}

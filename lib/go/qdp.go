@@ -434,102 +434,67 @@ func NewMessageReader(reader io.Reader) *MessageReader {
 	}
 }
 
-// ReadMessage now tries to process as many messages as possible from the buffer
+// ReadMessage handles buffered reading of messages
 func (r *MessageReader) ReadMessage() (*Message, error) {
 	for {
-		// Check if we need more data
+		// Ensure minimum header size
 		if r.count-r.pos < 8 {
 			if err := r.readMore(); err != nil {
-				return nil, err // Return immediately on read error
-			}
-			// If we still don't have enough data after reading
-			if r.count-r.pos < 8 {
-				continue
+				if r.count-r.pos < 8 { // Still not enough data after read
+					return nil, err
+				}
 			}
 		}
 
-		// Look for valid message start
-		for r.pos <= r.count-8 {
-			topicLen := binary.LittleEndian.Uint32(r.buffer[r.pos:])
-			payloadLen := binary.LittleEndian.Uint32(r.buffer[r.pos+4:])
+		// Try to find a valid message start within our current buffer
+		startPos := r.pos
+		for startPos <= r.count-8 {
+			topicLen := binary.LittleEndian.Uint32(r.buffer[startPos:])
+			payloadLen := binary.LittleEndian.Uint32(r.buffer[startPos+4:])
 
-			totalLen := 8 + topicLen + payloadLen + 4 // header + topic + payload + CRC
+			// Quick size validation
+			if topicLen <= maxTopicSize && payloadLen <= maxMessageSize {
+				totalLen := 8 + topicLen + payloadLen + 4
 
-			// Validate message size
-			if topicLen == 0 || topicLen > maxTopicSize ||
-				payloadLen > maxMessageSize-8-topicLen-4 {
-				r.pos++ // Invalid size, advance and continue scanning
-				continue
-			}
-
-			// If we don't have enough data for the complete message
-			if r.count-r.pos < int(totalLen) {
-				// Try to read more data
-				if err := r.readMore(); err != nil {
-					return nil, err
-				}
-				// If we still don't have enough data, start over
-				if r.count-r.pos < int(totalLen) {
+				// If we have a complete message in buffer
+				if startPos+int(totalLen) <= r.count {
+					msg, err := r.tryParseMessage(startPos, int(totalLen))
+					if err == nil {
+						r.pos = startPos + int(totalLen)
+						return msg, nil
+					}
+				} else {
+					// Need more data for complete message
+					if err := r.readMore(); err != nil {
+						// Only return error if we still don't have enough data
+						if startPos+int(totalLen) > r.count {
+							return nil, err
+						}
+					}
 					continue
 				}
 			}
+			startPos++
+		}
 
-			// Try to parse the message
-			msg, err := r.tryParseMessage(int(totalLen))
-			if err == nil {
-				return msg, nil
+		// If we've scanned the whole buffer without finding a message
+		if startPos >= r.count-8 {
+			r.pos = maxInt(r.count-8, 0) // Keep last 8 bytes for potential header
+			if err := r.readMore(); err != nil {
+				return nil, err
 			}
-			// On parse error, advance one byte and continue scanning
-			r.pos++
-		}
-
-		// If we've processed all data in the buffer, reset positions
-		if r.pos >= r.count {
-			r.pos = 0
-			r.count = 0
-		}
-
-		// Read more data before continuing
-		if err := r.readMore(); err != nil {
-			return nil, err
 		}
 	}
 }
 
-func (r *MessageReader) readMore() error {
-	// If there's unprocessed data, move it to start of buffer
-	if r.pos < r.count {
-		copy(r.buffer, r.buffer[r.pos:r.count])
-		r.count -= r.pos
-		r.pos = 0
-	} else {
-		r.count = 0
-		r.pos = 0
+func (r *MessageReader) tryParseMessage(start, totalLen int) (*Message, error) {
+	if start+totalLen > r.count {
+		return nil, ErrInvalidMessage
 	}
 
-	// Check if buffer is full
-	if r.count >= len(r.buffer) {
-		return errors.New("buffer full")
-	}
+	data := r.buffer[start : start+totalLen]
 
-	// Read more data
-	n, err := r.reader.Read(r.buffer[r.count:])
-	if n > 0 {
-		if n > 2 {
-			log.Debug("Received %d bytes: % x", n, r.buffer[r.count:r.count+n])
-		}
-		r.count += n
-	}
-	if err == io.EOF && n > 0 {
-		return nil // Return nil if we got some data even with EOF
-	}
-	return err
-}
-
-func (r *MessageReader) tryParseMessage(totalLen int) (*Message, error) {
-	data := r.buffer[r.pos : r.pos+totalLen]
-
-	// Verify CRC
+	// Verify CRC first
 	receivedCRC := binary.LittleEndian.Uint32(data[totalLen-4:])
 	calculatedCRC := calculateCRC32(data[:totalLen-4])
 	if receivedCRC != calculatedCRC {
@@ -539,11 +504,14 @@ func (r *MessageReader) tryParseMessage(totalLen int) (*Message, error) {
 	// Extract message fields
 	topicLen := binary.LittleEndian.Uint32(data[0:4])
 	payloadLen := binary.LittleEndian.Uint32(data[4:8])
-	topic := string(data[8 : 8+topicLen])
-	payload := data[8+topicLen : 8+topicLen+payloadLen]
 
-	// Advance past this message
-	r.pos += totalLen
+	// Double check sizes after CRC validation
+	if topicLen > maxTopicSize || payloadLen > maxMessageSize {
+		return nil, ErrInvalidMessage
+	}
+
+	topic := string(data[8 : 8+topicLen])
+	payload := data[8+topicLen : totalLen-4]
 
 	return &Message{
 		Topic:   topic,
@@ -551,10 +519,32 @@ func (r *MessageReader) tryParseMessage(totalLen int) (*Message, error) {
 	}, nil
 }
 
-// Update existing readMessage to use MessageReader
-func readMessage(r io.Reader) (*Message, error) {
-	reader := NewMessageReader(r)
-	return reader.ReadMessage()
+func (r *MessageReader) readMore() error {
+	// If buffer is getting full, shift data to beginning
+	if r.count > len(r.buffer)/2 {
+		copy(r.buffer, r.buffer[r.pos:r.count])
+		r.count -= r.pos
+		r.pos = 0
+	}
+
+	// Read more data
+	n, err := r.reader.Read(r.buffer[r.count:])
+	if n > 0 {
+		if n > 2 {
+			log.Debug("Received %d bytes: % x", n, r.buffer[r.count:r.count+n])
+		}
+		r.count += n
+		return nil // Return nil if we got any data
+	}
+	return err
+}
+
+// Helper function to get max of two ints
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func writeMessage(w io.Writer, msg *Message) error {
