@@ -420,11 +420,10 @@ const (
 
 // MessageReader handles buffered reading of QDP messages
 type MessageReader struct {
-	reader  io.Reader
-	buffer  []byte
-	pos     int
-	count   int
-	waiting bool // New flag to track if we're waiting for more data
+	reader io.Reader
+	buffer []byte
+	pos    int
+	count  int
 }
 
 // NewMessageReader creates a new buffered message reader
@@ -438,38 +437,49 @@ func NewMessageReader(reader io.Reader) *MessageReader {
 // ReadMessage now tries to process as many messages as possible from the buffer
 func (r *MessageReader) ReadMessage() (*Message, error) {
 	for {
-		// If we need more data and we're not already waiting
-		if (r.count-r.pos < 8 || r.waiting) && !r.waiting {
+		// Check if we need more data
+		if r.count-r.pos < 8 {
 			if err := r.readMore(); err != nil {
-				return nil, err
+				return nil, err // Return immediately on read error
 			}
-			r.waiting = true
+			// If we still don't have enough data after reading
+			if r.count-r.pos < 8 {
+				continue
+			}
 		}
 
-		// Process all complete messages in buffer
+		// Look for valid message start
 		for r.pos <= r.count-8 {
 			topicLen := binary.LittleEndian.Uint32(r.buffer[r.pos:])
 			payloadLen := binary.LittleEndian.Uint32(r.buffer[r.pos+4:])
 
-			// Validate sizes
-			if topicLen > 0 && topicLen <= maxTopicSize &&
-				payloadLen <= maxMessageSize-8-topicLen-4 {
+			totalLen := 8 + topicLen + payloadLen + 4 // header + topic + payload + CRC
 
-				totalLen := 8 + topicLen + payloadLen + 4 // header + topic + payload + CRC
+			// Validate message size
+			if topicLen == 0 || topicLen > maxTopicSize ||
+				payloadLen > maxMessageSize-8-topicLen-4 {
+				r.pos++ // Invalid size, advance and continue scanning
+				continue
+			}
 
-				// If we have a complete message
-				if r.count-r.pos >= int(totalLen) {
-					msg, err := r.tryParseMessage(int(totalLen))
-					r.waiting = false // Reset waiting flag on successful parse
-					if err == nil {
-						return msg, nil
-					}
-					// On parse error, advance one byte and continue scanning
-					r.pos++
+			// If we don't have enough data for the complete message
+			if r.count-r.pos < int(totalLen) {
+				// Try to read more data
+				if err := r.readMore(); err != nil {
+					return nil, err
+				}
+				// If we still don't have enough data, start over
+				if r.count-r.pos < int(totalLen) {
 					continue
 				}
 			}
-			// Not enough data or invalid sizes, advance
+
+			// Try to parse the message
+			msg, err := r.tryParseMessage(int(totalLen))
+			if err == nil {
+				return msg, nil
+			}
+			// On parse error, advance one byte and continue scanning
 			r.pos++
 		}
 
@@ -477,7 +487,11 @@ func (r *MessageReader) ReadMessage() (*Message, error) {
 		if r.pos >= r.count {
 			r.pos = 0
 			r.count = 0
-			r.waiting = false
+		}
+
+		// Read more data before continuing
+		if err := r.readMore(); err != nil {
+			return nil, err
 		}
 	}
 }
@@ -493,15 +507,22 @@ func (r *MessageReader) readMore() error {
 		r.pos = 0
 	}
 
+	// Check if buffer is full
+	if r.count >= len(r.buffer) {
+		return errors.New("buffer full")
+	}
+
 	// Read more data
 	n, err := r.reader.Read(r.buffer[r.count:])
 	if n > 0 {
-		// Only log reads larger than 2 bytes to avoid noise from USB status bytes
 		if n > 2 {
 			log.Debug("Received %d bytes: % x", n, r.buffer[r.count:r.count+n])
 		}
+		r.count += n
 	}
-	r.count += n
+	if err == io.EOF && n > 0 {
+		return nil // Return nil if we got some data even with EOF
+	}
 	return err
 }
 
