@@ -81,8 +81,6 @@ bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg) {
         return false;
     }
 
-    size_t start_pos = buf->size;
-
     // Write lengths in little-endian
     write_uint32_le(buf->data + buf->size, msg->header.topic_len);
     buf->size += 4;
@@ -98,7 +96,7 @@ bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg) {
     buf->size += msg->payload.size;
 
     // Calculate CRC on everything before CRC position
-    uint32_t crc = qdp_calc_crc32(buf->data, buf->size - start_pos);
+    uint32_t crc = qdp_calc_crc32(buf->data, buf->size);
     write_uint32_le(buf->data + buf->size, crc);
     buf->size += sizeof(uint32_t);
 
