@@ -98,7 +98,7 @@ bool qdp_message_write(qdp_buffer_t *buf, const qdp_message_t *msg) {
     buf->size += msg->payload.size;
 
     // Calculate CRC on everything before CRC position
-    uint32_t crc = qdp_calc_crc32(buf->data, buf->size - start_pos);
+    uint32_t crc = qdp_calc_crc32(buf->data + start_pos, buf->size - start_pos);
     write_uint32_le(buf->data + buf->size, crc);
     buf->size += sizeof(uint32_t);
 
