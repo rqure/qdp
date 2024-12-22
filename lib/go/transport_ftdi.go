@@ -320,7 +320,7 @@ func (t *FTDITransport) WriteMessage(msg *Message) error {
 		return err
 	}
 
-	_, err = t.outEndpoint.WriteContext(t.ctx, encoded)
+	_, err = writeChunked(t.outEndpoint, t.ctx, encoded)
 	if err != nil {
 		if isUsbDisconnectError(err) && !t.disconnected.Load() {
 			t.disconnected.Store(true)
@@ -335,7 +335,7 @@ func (t *FTDITransport) WriteMessage(msg *Message) error {
 		}
 
 		// Retry writing after successful reconnection
-		_, err = t.outEndpoint.WriteContext(t.ctx, encoded)
+		_, err = writeChunked(t.outEndpoint, t.ctx, encoded)
 		if err != nil {
 			return err
 		}
@@ -386,13 +386,70 @@ func isUsbDisconnectError(err error) bool {
 		strings.Contains(strings.ToLower(errStr), "resource temporarily unavailable")
 }
 
+const (
+	ftdiStatusSize    = 2  // Size of FTDI status bytes
+	ftdiMaxPacketSize = 64 // Maximum USB packet size including status bytes
+	ftdiMaxDataSize   = 62 // Maximum data size per packet (64 - 2 status bytes)
+)
+
+type ioReaderWithContext interface {
+	ReadContext(ctx context.Context, p []byte) (int, error)
+}
+
 // endpointReader implements io.Reader for USB endpoints
 type endpointReader struct {
-	ep  *gousb.InEndpoint
-	ctx context.Context
+	ep   ioReaderWithContext
+	ctx  context.Context
+	buf  []byte
+	pos  int
+	size int
 }
 
 func (r *endpointReader) Read(p []byte) (n int, err error) {
-	// Use ReadContext instead of Read
-	return r.ep.ReadContext(r.ctx, p)
+	// If buffer is empty, read new packet
+	if r.pos >= r.size {
+		// Read raw packet including status bytes
+		packet := make([]byte, ftdiMaxPacketSize)
+		bytesRead, err := r.ep.ReadContext(r.ctx, packet)
+		if err != nil {
+			return 0, err
+		}
+
+		// Strip status bytes and store data
+		if bytesRead > ftdiStatusSize {
+			r.buf = packet[ftdiStatusSize:bytesRead]
+			r.size = bytesRead - ftdiStatusSize
+			r.pos = 0
+		} else {
+			r.size = 0
+			r.pos = 0
+			return 0, nil // No data available
+		}
+	}
+
+	// Copy data from buffer to output
+	n = copy(p, r.buf[r.pos:r.size])
+	r.pos += n
+	return n, nil
+}
+
+// Add new method to handle chunked writes for FTDI
+func writeChunked(ep *gousb.OutEndpoint, ctx context.Context, data []byte) (int, error) {
+	var written int
+	for len(data) > 0 {
+		// Calculate chunk size
+		chunkSize := ftdiMaxDataSize
+		if len(data) < chunkSize {
+			chunkSize = len(data)
+		}
+
+		// Write chunk
+		n, err := ep.WriteContext(ctx, data[:chunkSize])
+		if err != nil {
+			return written, err
+		}
+		written += n
+		data = data[chunkSize:]
+	}
+	return written, nil
 }
