@@ -4,7 +4,7 @@ go 1.22.7
 
 require (
 	github.com/google/gousb v1.1.3
-	github.com/rqure/qlib v0.0.29
+	github.com/rqure/qlib v0.0.30
 )
 
 require (
