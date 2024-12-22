@@ -2,7 +2,9 @@ package qdp
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -79,6 +81,10 @@ func NewFTDITransport(config FTDIConfig, connectionHandler IConnectionHandler) (
 
 // Add new method to handle connection setup
 func (t *FTDITransport) connect(ctx *gousb.Context) error {
+	if ctx == nil {
+		return errors.New("USB context is nil")
+	}
+
 	device, err := ctx.OpenDeviceWithVIDPID(gousb.ID(t.config.VID), gousb.ID(t.config.PID))
 	if err != nil {
 		ctx.Close()
@@ -131,6 +137,15 @@ func (t *FTDITransport) connect(ctx *gousb.Context) error {
 		device.Close()
 		ctx.Close()
 		return fmt.Errorf("failed to get OUT endpoint: %w", err)
+	}
+
+	// Add additional validation for endpoints
+	if inEndpoint == nil || outEndpoint == nil {
+		intf.Close()
+		cfg.Close()
+		device.Close()
+		ctx.Close()
+		return errors.New("failed to get valid endpoints")
 	}
 
 	// Configure UART settings
@@ -190,6 +205,7 @@ func (t *FTDITransport) connect(ctx *gousb.Context) error {
 	t.reader = NewMessageReader(&endpointReader{
 		ep:  t.inEndpoint,
 		ctx: t.ctx,
+		buf: make([]byte, ftdiMaxPacketSize),
 	})
 
 	t.disconnected.Store(false)
@@ -283,6 +299,10 @@ func (t *FTDITransport) closeResources() {
 }
 
 func (t *FTDITransport) ReadMessage() (*Message, error) {
+	if t.reader == nil {
+		return nil, errors.New("transport not initialized")
+	}
+
 	msg, err := t.reader.ReadMessage()
 
 	if err != nil {
@@ -406,29 +426,42 @@ type endpointReader struct {
 }
 
 func (r *endpointReader) Read(p []byte) (n int, err error) {
+	if r.ep == nil {
+		return 0, errors.New("endpoint is nil")
+	}
+	if len(p) == 0 {
+		return 0, nil
+	}
+
 	// If buffer is empty, read new packet
 	if r.pos >= r.size {
-		// Read raw packet including status bytes
-		packet := make([]byte, ftdiMaxPacketSize)
-		bytesRead, err := r.ep.ReadContext(r.ctx, packet)
+		if r.buf == nil {
+			r.buf = make([]byte, ftdiMaxPacketSize)
+		}
+
+		// Read with context and handle errors
+		bytesRead, err := r.ep.ReadContext(r.ctx, r.buf)
 		if err != nil {
-			return 0, err
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return 0, err
+			}
+			// For USB errors, return EOF to trigger reconnect
+			return 0, io.EOF
 		}
 
 		// Strip status bytes and store data
 		if bytesRead > ftdiStatusSize {
-			r.buf = packet[ftdiStatusSize:bytesRead]
 			r.size = bytesRead - ftdiStatusSize
 			r.pos = 0
 		} else {
 			r.size = 0
 			r.pos = 0
-			return 0, nil // No data available
+			return 0, nil
 		}
 	}
 
 	// Copy data from buffer to output
-	n = copy(p, r.buf[r.pos:r.size])
+	n = copy(p, r.buf[ftdiStatusSize+r.pos:ftdiStatusSize+r.size])
 	r.pos += n
 	return n, nil
 }
