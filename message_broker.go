@@ -100,7 +100,7 @@ func (w *MessageBroker) setupTcpTransport(ctx context.Context, transportEntity d
 
 				protocol.StartReceiving(w.ctx)
 
-				topics := query.New(w.store).ForType("QdpTopic").Execute(ctx)
+				topics := query.New(w.store).From("QdpTopic").Execute(ctx)
 
 				for _, topicEntity := range topics {
 					topic := topicEntity.GetField("Topic").ReadString(ctx)
@@ -220,7 +220,7 @@ func (w *MessageBroker) setupFtdiTransport(ctx context.Context, transportEntity 
 				protocol.StartReceiving(w.ctx)
 
 				// Subscribe to topics
-				topics := query.New(w.store).ForType("QdpTopic").Execute(ctx)
+				topics := query.New(w.store).From("QdpTopic").Execute(ctx)
 
 				for _, topicEntity := range topics {
 					topic := topicEntity.GetField("Topic").ReadString(ctx)
@@ -330,14 +330,14 @@ func (w *MessageBroker) setup(ctx context.Context) {
 			SetFieldName("IsEnabled"),
 		notification.NewCallback(w.onFtdiTransportIsEnabledChanged)))
 
-	tcpTransports := query.New(w.store).ForType("QdpTcpTransport").Execute(ctx)
+	tcpTransports := query.New(w.store).From("QdpTcpTransport").Execute(ctx)
 
 	for _, transportEntity := range tcpTransports {
 		w.setupTcpTransport(ctx, transportEntity)
 	}
 
 	// Setup FTDI transports
-	ftdiTransports := query.New(w.store).ForType("QdpFtdiTransport").Execute(ctx)
+	ftdiTransports := query.New(w.store).From("QdpFtdiTransport").Execute(ctx)
 	for _, transportEntity := range ftdiTransports {
 		w.setupFtdiTransport(ctx, transportEntity)
 	}
